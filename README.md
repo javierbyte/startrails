@@ -17,7 +17,7 @@ For best results:
 
 ## Installation
 
-Requires Node.js 18+.
+Requires Node.js 18+. The only dependency is [node-canvas](https://github.com/Automattic/node-canvas).
 
 ```bash
 git clone https://github.com/jb/star-trails.git
