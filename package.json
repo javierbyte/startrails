@@ -1,0 +1,27 @@
+{
+  "name": "star-trails",
+  "version": "1.0.0",
+  "description": "Create star trail images from timelapse photography with artistic power falloff curves",
+  "main": "star-trails.js",
+  "bin": {
+    "star-trails": "./star-trails.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "star-trails",
+    "astrophotography",
+    "timelapse",
+    "image-processing",
+    "photography"
+  ],
+  "author": "jb",
+  "license": "ISC",
+  "dependencies": {
+    "canvas": "^3.2.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["canvas"]
+  }
+}
