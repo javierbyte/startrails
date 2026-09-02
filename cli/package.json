@@ -1,0 +1,22 @@
+{
+  "name": "star-trails-cli",
+  "version": "1.0.0",
+  "packageManager": "pnpm@11.21.0",
+  "description": "Create star trail images from timelapse photography with artistic power falloff curves",
+  "main": "star-trails.js",
+  "bin": {
+    "star-trails": "./star-trails.js"
+  },
+  "author": "Javier Bórquez <hi@javier.xyz> (http://github.com/javierbyte)",
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "star-trails",
+    "astrophotography",
+    "timelapse",
+    "image-processing",
+    "photography"
+  ],
+  "dependencies": {
+    "canvas": "^3.2.1"
+  }
+}

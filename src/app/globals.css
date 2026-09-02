@@ -1,0 +1,244 @@
+:root {
+  --accent-color: #8b9ceb;
+}
+
+.app {
+  width: 100%;
+}
+
+.jbx-card {
+  border-radius: 12px;
+  background-color: #80808010;
+  border: 1px solid #80808010;
+}
+
+.jbx-card.-disabled,
+.control-group.-disabled {
+  opacity: 0.55;
+}
+
+/* A frame interval reads like a video cropper: one rail, with an independently
+   focusable handle at each end. The native ranges still provide all keyboard
+   and pointer behavior; only their duplicate rails are replaced here. */
+.frame-range {
+  position: relative;
+  height: calc(var(--size) * 2);
+}
+
+.frame-range::before,
+.frame-range::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  height: var(--size);
+  transform: translateY(-50%);
+  border-radius: var(--radius-small);
+  pointer-events: none;
+}
+
+.frame-range::before {
+  left: 0;
+  right: 0;
+  background-color: #c0c0c080;
+}
+
+.frame-range::after {
+  left: var(--frame-first);
+  right: calc(100% - var(--frame-last));
+  background-color: var(--accent-color);
+}
+
+.frame-range .jbx-range {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 1;
+  margin: 0;
+  transform: translateY(-50%);
+  background-color: transparent;
+  pointer-events: none;
+}
+
+.frame-range .jbx-range:last-child {
+  z-index: 2;
+}
+
+/* When the interval collapses, leave the handle that can expand back toward
+   the middle on top. The focused handle always wins during an active drag. */
+.frame-range.-first-on-top .jbx-range:first-child {
+  z-index: 3;
+}
+
+.frame-range .jbx-range:focus {
+  z-index: 4;
+}
+
+.frame-range .jbx-range::-webkit-slider-runnable-track {
+  background-color: transparent;
+}
+
+.frame-range .jbx-range::-moz-range-track {
+  background-color: transparent;
+}
+
+.frame-range .jbx-range::-webkit-slider-thumb {
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.frame-range .jbx-range::-moz-range-thumb {
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.frame-range .jbx-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-color);
+}
+
+.frame-range .jbx-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px var(--accent-color);
+}
+
+/* The stacked preview. The canvas is always in the DOM, because it can only be
+   handed to the worker once and that happens on mount. */
+/* Never taller than this much of the viewport, so the Look controls stay on
+   screen for a portrait sequence. Capping the width against the aspect ratio,
+   rather than capping the height, is what keeps the canvas undistorted. */
+.stage {
+  position: relative;
+  width: min(
+    var(--preview-display-width, 100%),
+    100%,
+    calc(60vh * var(--preview-aspect, 1))
+  );
+  aspect-ratio: var(--preview-aspect, 1);
+  margin-inline: auto;
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #071626;
+}
+
+.preview-poster,
+.preview-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transition: filter 0.3s ease;
+}
+
+.preview-poster {
+  object-fit: cover;
+}
+
+.preview-poster.-hidden,
+.preview-canvas.-hidden {
+  visibility: hidden;
+}
+
+.stage.-loading .preview-poster,
+.stage.-loading .preview-canvas {
+  animation: preview-brightness 2.6s ease-in-out infinite;
+}
+
+@keyframes preview-brightness {
+  0%,
+  100% {
+    filter: grayscale(1) brightness(0.72);
+  }
+  50% {
+    filter: grayscale(1) brightness(0.95);
+  }
+}
+
+.stage-status {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.75rem 1rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+  color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage.-loading .preview-poster,
+  .stage.-loading .preview-canvas {
+    animation: none;
+    filter: grayscale(1) brightness(0.84);
+  }
+}
+
+.stage-status .jbx-small-text {
+  color: #fff;
+}
+
+.bar {
+  margin-top: 0.4rem;
+  height: 3px;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background-color: #fff;
+  transition: width 0.12s linear;
+}
+
+.github-corner {
+  z-index: 10;
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.github-corner:hover .octo-arm {
+  animation: octocat-wave 560ms ease-in-out;
+}
+
+@keyframes octocat-wave {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  20%,
+  60% {
+    transform: rotate(-25deg);
+  }
+  40%,
+  80% {
+    transform: rotate(10deg);
+  }
+}
+
+@media (max-width: 500px) {
+  .github-corner:hover .octo-arm {
+    animation: none;
+  }
+
+  .github-corner .octo-arm {
+    animation: octocat-wave 560ms ease-in-out;
+  }
+}
+
+/* Source details, below the controls: label/value pairs that keep their columns
+   when a filename runs long. */
+.stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 1rem;
+  font-size: var(--font-size-small);
+}
+
+.stats dt {
+  opacity: 0.6;
+}
+
+.stats dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

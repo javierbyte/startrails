@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const { createCanvas, loadImage } = require('canvas');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -124,6 +125,19 @@ async function main() {
   // Write output
   const buffer = canvas.toBuffer('image/jpeg', { quality: 0.95 });
   fs.writeFileSync(outPath, buffer);
+
+  // Copy EXIF data from first image to output
+  if (args.exif) {
+    const firstImagePath = path.join(srcDir, files[0]);
+    try {
+      execSync(`exiftool -TagsFromFile "${firstImagePath}" -overwrite_original "${outPath}"`, {
+        stdio: 'pipe'
+      });
+      console.error('EXIF data copied from first image');
+    } catch (err) {
+      console.error('Warning: Could not copy EXIF data (exiftool not available)');
+    }
+  }
 
   // Output the path to stdout for scripting
   console.log(outPath);

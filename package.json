@@ -1,27 +1,26 @@
 {
-  "name": "star-trails",
+  "name": "startrails",
+  "description": "Stack timelapse frames into a star trail image, in your browser.",
   "version": "1.0.0",
-  "description": "Create star trail images from timelapse photography with artistic power falloff curves",
-  "main": "star-trails.js",
-  "bin": {
-    "star-trails": "./star-trails.js"
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "homepage": "https://javier.xyz/startrails",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/javierbyte/startrails/"
   },
+  "author": "Javier Bórquez <hi@javier.xyz> (http://github.com/javierbyte)",
+  "license": "BSD-3-Clause",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "echo 'Local:         http://localhost:3009/startrails' && next dev -p 3009",
+    "build": "next build"
   },
-  "keywords": [
-    "star-trails",
-    "astrophotography",
-    "timelapse",
-    "image-processing",
-    "photography"
-  ],
-  "author": "jb",
-  "license": "ISC",
   "dependencies": {
-    "canvas": "^3.2.1"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["canvas"]
+    "@next/third-parties": "16.3.4",
+    "jbx": "^2.15.0",
+    "next": "16.3.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }
