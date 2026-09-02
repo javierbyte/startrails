@@ -1,0 +1,1047 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+import {
+  Box,
+  Button,
+  Checkbox,
+  HeaderH4,
+  Inline,
+  Range,
+  SmallText,
+  Space,
+  Tab,
+  Tabs,
+  Text,
+} from 'jbx';
+
+import { BASE_PATH } from '../lib/constants.js';
+import { applySourceMetadata } from '../lib/exif.js';
+import { createStacker, downloadBlob, exportFileName } from '../lib/stackClient.js';
+import {
+  ensureReadPermission,
+  folderNameFromFileList,
+  framesFromDataTransfer,
+  framesFromFileList,
+  forgetHandle,
+  pickDirectory,
+  readHandleFrames,
+  recallHandle,
+  supportsDirectoryPicker,
+} from '../lib/folder.js';
+import { fetchVideoFile, framesFromVideoFile, isVideo } from '../lib/video.js';
+
+// The page loads this by itself so the controls have something real under them
+// from the start: a still gallery could only show finished stacks, where the
+// whole point is the power and range handles moving. It is a short clip, and it
+// is cancelled the moment anyone opens their own footage.
+//
+// The page is served at /startrails with no trailing slash, so a relative URL
+// would resolve against the site root.
+const SAMPLE = {
+  src: `${BASE_PATH}/example-startrail.mp4`,
+  poster: `${BASE_PATH}/example-startrail-preview.jpg`,
+  name: 'example-startrail.mp4',
+  frames: 84,
+  natural: { width: 1080, height: 1620 },
+  preview: { width: 893, height: 1340, density: 2 },
+};
+
+const DEFAULTS = { power: 2, minOpacity: 0 };
+const INTRO_DURATION = 1000;
+
+const SOURCE_LABEL = { video: 'Video', photos: 'Photos', folder: 'Folder' };
+
+// A jbx link that runs an action instead of navigating: the class carries the
+// look, the element stays a button so it focuses and Enter works.
+const LINK_STYLE = { border: 0, background: 'none', padding: 0, font: 'inherit' };
+
+/** "every 3rd frame" reads better than "every 3 frames" for the sampling note. */
+function ordinal(value) {
+  const teens = value % 100;
+  if (teens >= 11 && teens <= 13) return `${value}th`;
+  return `${value}${['th', 'st', 'nd', 'rd'][value % 10] || 'th'}`;
+}
+
+/** Loose photos have no folder to be named after, so they say what they are. */
+function describePicks(picks) {
+  if (!picks.length) return 'Selected files';
+  if (picks.length === 1) return picks[0].name;
+  return `${picks[0].name} – ${picks[picks.length - 1].name}`;
+}
+
+function formatFps(fps) {
+  return fps.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function Card({ children, disabled = false }) {
+  return (
+    <div
+      className={`jbx-card${disabled ? ' -disabled' : ''}`}
+      inert={disabled ? true : undefined}
+      aria-disabled={disabled || undefined}
+    >
+      <Box padding={1}>{children}</Box>
+    </div>
+  );
+}
+
+function progressLabel(progress) {
+  if (!progress) return '';
+  switch (progress.phase) {
+    case 'fetch':
+      return progress.total
+        ? `Loading the sample video ${(progress.done / 1e6).toFixed(1)} / ${(
+            progress.total / 1e6
+          ).toFixed(1)} MB`
+        : 'Loading the sample video';
+    case 'extract':
+      return `Extracting frames ${progress.done} / ${progress.total}`;
+    case 'load':
+      return `Reading frames ${progress.done} / ${progress.total}`;
+    case 'export':
+      return `Stacking ${progress.done} / ${progress.total}`;
+    default:
+      return '';
+  }
+}
+
+function FrameRange({ disabled, first, last, max, onFirstChange, onLastChange }) {
+  const scale = Math.max(max, 1);
+
+  return (
+    <div
+      className={`frame-range${first === last && first > max / 2 ? ' -first-on-top' : ''}`}
+      style={{
+        '--frame-first': `${(first / scale) * 100}%`,
+        '--frame-last': `${(last / scale) * 100}%`,
+      }}
+    >
+      <Range
+        aria-label="First frame"
+        aria-valuetext={`Frame ${first + 1} of ${max + 1}`}
+        min={0}
+        max={max}
+        step={1}
+        value={first}
+        disabled={disabled}
+        onChange={onFirstChange}
+      />
+      <Range
+        aria-label="Last frame"
+        aria-valuetext={`Frame ${last + 1} of ${max + 1}`}
+        min={0}
+        max={max}
+        step={1}
+        value={last}
+        disabled={disabled}
+        onChange={onLastChange}
+      />
+    </div>
+  );
+}
+
+export default function StarTrailsApp() {
+  const canvasRef = useRef(null);
+  const stackerRef = useRef(null);
+  const eventRef = useRef(() => {});
+  // The worker only ever runs one restack at a time; a drag that outruns it
+  // parks its latest values here and fires them the moment it reports back.
+  const previewRef = useRef({ busy: false, queued: null, sent: null });
+  // Video extraction runs on the main thread and can take a while, so a second
+  // drop has to be able to call off the one in progress.
+  const extractRef = useRef(null);
+  // New source details stay pending until the worker has a complete cache and
+  // an initial composite ready to replace the visible preview.
+  const pendingLoadRef = useRef(null);
+  const loadRequestRef = useRef(0);
+  const cacheReadyRef = useRef(false);
+  const skipNextPreviewRef = useRef(false);
+  const folderInputRef = useRef(null);
+
+  const [frames, setFrames] = useState([]);
+  const [folder, setFolder] = useState(null);
+  const [handle, setHandle] = useState(null);
+  const [savedFolder, setSavedFolder] = useState(null);
+  const [source, setSource] = useState('folder');
+  const [videoSummary, setVideoSummary] = useState(null);
+  const [isSample, setIsSample] = useState(false);
+  // showDirectoryPicker cannot be asked about while rendering on the server, so
+  // the first client render has to agree with the server and say no. Anything
+  // that branches on it waits for this.
+  const [mounted, setMounted] = useState(false);
+  const canPickDirectory = mounted && supportsDirectoryPicker();
+
+  const [natural, setNatural] = useState(SAMPLE.natural);
+  const [preview, setPreview] = useState(SAMPLE.preview);
+  const [hasPreview, setHasPreview] = useState(false);
+
+  const [power, setPower] = useState(DEFAULTS.power);
+  const [minOpacity, setMinOpacity] = useState(DEFAULTS.minOpacity);
+  const [first, setFirst] = useState(0);
+  const [last, setLast] = useState(0);
+
+  const [rotation, setRotation] = useState(0);
+  const [scale, setScale] = useState(1);
+  const [copyExif, setCopyExif] = useState(true);
+
+  const [status, setStatus] = useState('extracting');
+  const [progress, setProgress] = useState({
+    phase: 'fetch',
+    step: 0,
+    steps: 3,
+    done: 0,
+    total: 0,
+  });
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const ready = status === 'ready' || status === 'intro' || status === 'exporting';
+  const controlsDisabled = status !== 'ready';
+  const mediaLoading = status === 'extracting' || status === 'loading';
+  // "Nothing of the viewer's own is open yet." The sample counts as nothing:
+  // it loads on its own, so gating on frames.length would hide Reopen a second
+  // after arrival, which is exactly when it is wanted.
+  const untouched = isSample || !frames.length;
+
+  // --- worker plumbing ---------------------------------------------------
+
+  const sendPreview = useCallback((params) => {
+    const stacker = stackerRef.current;
+    if (!stacker) return;
+    const pending = previewRef.current;
+    pending.queued = params;
+    if (pending.busy) return;
+    pending.busy = true;
+    pending.sent = params;
+    stacker.preview(params);
+  }, []);
+
+  // The worker hands back a bare canvas JPEG. Metadata is spliced on here
+  // rather than in the worker, which has to stay import-free.
+  const finishExport = useCallback(
+    async (message) => {
+      let blob = message.blob;
+      let exifApplied = false;
+
+      // Frames extracted from a video are canvas JPEGs with no APP segments of
+      // their own, so there is nothing to carry over.
+      if (copyExif && source !== 'video') {
+        try {
+          const withExif = await applySourceMetadata(
+            blob,
+            frames[first],
+            message.width,
+            message.height
+          );
+          blob = withExif.blob;
+          exifApplied = withExif.applied;
+        } catch (err) {
+          // Metadata is a bonus; never lose a finished render over it.
+          exifApplied = false;
+        }
+      }
+
+      setStatus('ready');
+      setProgress(null);
+      setResult({
+        width: message.width,
+        height: message.height,
+        frames: message.frames,
+        exifApplied,
+      });
+      downloadBlob(
+        blob,
+        exportFileName({
+          firstName: frames[first].name,
+          lastName: frames[last].name,
+          power,
+          minOpacity: minOpacity / 100,
+        })
+      );
+    },
+    [copyExif, first, frames, last, minOpacity, power, source]
+  );
+
+  eventRef.current = (message) => {
+    switch (message.type) {
+      case 'loadStarted':
+        break;
+
+      case 'progress':
+        if (
+          message.phase === 'load' &&
+          pendingLoadRef.current?.requestId !== message.requestId
+        ) {
+          break;
+        }
+        if (message.phase === 'load') {
+          setProgress({
+            ...message,
+            step: pendingLoadRef.current.step,
+            steps: pendingLoadRef.current.steps,
+          });
+        } else {
+          setProgress(message);
+        }
+        break;
+
+      case 'loaded': {
+        const pending = pendingLoadRef.current;
+        if (!pending || pending.requestId !== message.requestId) break;
+
+        pendingLoadRef.current = null;
+        cacheReadyRef.current = true;
+        skipNextPreviewRef.current = true;
+        setFrames(pending.frames);
+        setFolder(pending.name);
+        setHandle(pending.handle);
+        setSource(pending.kind);
+        setVideoSummary(pending.videoSummary);
+        setIsSample(pending.isSample);
+        setFirst(0);
+        setLast(pending.isSample ? 0 : pending.frames.length - 1);
+        setNatural(message.natural);
+        setPreview(message.preview);
+        setHasPreview(true);
+        setProgress(null);
+        setStatus(pending.isSample ? 'intro' : 'ready');
+        break;
+      }
+
+      case 'previewDone': {
+        const pending = previewRef.current;
+        pending.busy = false;
+        if (pending.queued && pending.queued !== pending.sent) sendPreview(pending.queued);
+        break;
+      }
+
+      case 'exportDone':
+        finishExport(message);
+        break;
+
+      case 'exportCancelled':
+        setStatus('ready');
+        setProgress(null);
+        break;
+
+      case 'error':
+        if (
+          message.phase === 'load' &&
+          pendingLoadRef.current?.requestId !== message.requestId
+        ) {
+          break;
+        }
+        setError(message.message);
+        // A failed load has no complete preview cache to restack. Export errors
+        // can return to the already-loaded preview, but aspect-ratio/decode
+        // errors must leave the controls disabled until another folder opens.
+        if (message.phase === 'load') {
+          pendingLoadRef.current = null;
+          cacheReadyRef.current = false;
+        }
+        setStatus(
+          message.phase === 'load'
+            ? 'idle'
+            : cacheReadyRef.current && frames.length
+              ? 'ready'
+              : 'idle'
+        );
+        setProgress(null);
+        break;
+
+      default:
+        break;
+    }
+  };
+
+  useEffect(() => {
+    if (stackerRef.current || !canvasRef.current) return;
+    stackerRef.current = createStacker({
+      canvas: canvasRef.current,
+      onEvent: (message) => eventRef.current(message),
+    });
+    // Deliberately never torn down: a canvas can only be handed to a worker
+    // once, so a remount could not rebuild this.
+  }, []);
+
+  useEffect(() => {
+    setMounted(true);
+    if (!supportsDirectoryPicker()) return;
+    recallHandle().then((saved) => saved && setSavedFolder(saved));
+  }, []);
+
+  // Any change to the look re-stacks the cached preview frames.
+  useEffect(() => {
+    if (!ready) return;
+    // A successful load already rendered these exact values into a temporary
+    // worker canvas before atomically committing them to the visible canvas.
+    if (skipNextPreviewRef.current) {
+      skipNextPreviewRef.current = false;
+      return;
+    }
+    sendPreview({ power, minOpacity: minOpacity / 100, first, last, rotation });
+  }, [ready, power, minOpacity, first, last, rotation, sendPreview]);
+
+  // The saved poster is frame 1, so the sample can hand off without a visual
+  // jump and then quickly reveal the complete trail. Controls stay inert until
+  // the sweep finishes, keeping the animation and range handles in lockstep.
+  useEffect(() => {
+    if (status !== 'intro') return;
+    const finalFrame = frames.length - 1;
+    if (finalFrame <= 0) {
+      setStatus('ready');
+      return;
+    }
+
+    let animationFrame;
+    const started = performance.now();
+    const tick = (now) => {
+      const progress = Math.min(1, (now - started) / INTRO_DURATION);
+      setLast(Math.round(finalFrame * progress));
+      if (progress < 1) {
+        animationFrame = requestAnimationFrame(tick);
+      } else {
+        setStatus('ready');
+      }
+    };
+
+    animationFrame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [frames.length, status]);
+
+  const turn = useCallback((degrees) => {
+    setRotation((current) => (current + degrees + 360) % 360);
+  }, []);
+
+  // --- opening folders ---------------------------------------------------
+
+  // The single funnel every input path ends at, videos included: by this point a
+  // video has already become an array of frames.
+  const acceptFrames = useCallback(
+    (nextFrames, name, nextHandle, kind = 'folder', details = {}) => {
+      // Opening photos or a folder abandons a video that is still being
+      // extracted; the video path manages its own controller and must not
+      // cancel itself here.
+      if (kind !== 'video' && extractRef.current) {
+        extractRef.current.abort();
+        extractRef.current = null;
+      }
+
+      setError(null);
+      setResult(null);
+
+      // Invalidate a worker load immediately. Its messages carry a request ID
+      // too, but cancellation lets it release decoded proxies without doing
+      // the rest of the work.
+      pendingLoadRef.current = null;
+      stackerRef.current.cancelLoad();
+
+      if (!nextFrames || !nextFrames.length) {
+        setError(
+          kind === 'video'
+            ? 'No frames could be read out of that video.'
+            : kind === 'photos'
+              ? 'Those files are not JPEGs or PNGs.'
+              : 'No JPEG or PNG frames directly inside that folder.'
+        );
+        setStatus(cacheReadyRef.current && frames.length ? 'ready' : 'idle');
+        setProgress(null);
+        return;
+      }
+
+      const requestId = ++loadRequestRef.current;
+      const intro = Boolean(details.isSample);
+      const step = kind === 'video' ? (intro ? 2 : 1) : 0;
+      const steps = kind === 'video' ? (intro ? 3 : 2) : 1;
+      pendingLoadRef.current = {
+        requestId,
+        step,
+        steps,
+        frames: nextFrames,
+        name,
+        handle: nextHandle || null,
+        kind,
+        videoSummary: details.videoSummary || null,
+        isSample: intro,
+      };
+      cacheReadyRef.current = false;
+      setStatus('loading');
+      setProgress({
+        phase: 'load',
+        requestId,
+        step,
+        steps,
+        done: 0,
+        total: nextFrames.length,
+      });
+      previewRef.current = { busy: false, queued: null, sent: null };
+      stackerRef.current.load(
+        nextFrames,
+        {
+          power,
+          minOpacity: minOpacity / 100,
+          first: 0,
+          last: intro ? 0 : nextFrames.length - 1,
+          rotation,
+        },
+        requestId
+      );
+    },
+    [frames.length, minOpacity, power, rotation]
+  );
+
+  const acceptVideo = useCallback(
+    async (file, { sample = false } = {}) => {
+      if (extractRef.current) extractRef.current.abort();
+      const controller = new AbortController();
+      extractRef.current = controller;
+      pendingLoadRef.current = null;
+      stackerRef.current.cancelLoad();
+
+      setError(null);
+      setResult(null);
+      setStatus('extracting');
+      const step = sample ? 1 : 0;
+      const steps = sample ? 3 : 2;
+      setProgress({ phase: 'extract', step, steps, done: 0, total: 1 });
+
+      try {
+        const { frames: extracted, summary } = await framesFromVideoFile(file, {
+          signal: controller.signal,
+          onProgress: (done, total) => {
+            if (!controller.signal.aborted) {
+              setProgress({ phase: 'extract', step, steps, done, total });
+            }
+          },
+        });
+        if (controller.signal.aborted) return;
+        acceptFrames(extracted, file.name, null, 'video', {
+          videoSummary: summary,
+          isSample: sample,
+        });
+      } catch (err) {
+        // A newer drop cancelled this one; it owns the UI now.
+        if (controller.signal.aborted || err.name === 'AbortError') return;
+        setError(err.message);
+        setStatus(cacheReadyRef.current && frames.length ? 'ready' : 'idle');
+        setProgress(null);
+      } finally {
+        if (extractRef.current === controller) extractRef.current = null;
+      }
+    },
+    [acceptFrames, frames.length]
+  );
+
+  // The sample clip, fetched and extracted on the way in so the controls are
+  // live without anyone having to find footage first. It shares extractRef with
+  // every other input path, so opening a folder or a video mid-download aborts
+  // both the fetch and the extraction and takes over.
+  const loadSample = useCallback(async () => {
+    // A user can select a folder in the short idle window before this deferred
+    // task runs. Pending or committed user frames take precedence just like an
+    // in-progress video extraction does.
+    if (extractRef.current || pendingLoadRef.current || cacheReadyRef.current) return;
+    const controller = new AbortController();
+    extractRef.current = controller;
+
+    setStatus('extracting');
+    setProgress({ phase: 'fetch', step: 0, steps: 3, done: 0, total: 0 });
+
+    let file;
+    try {
+      file = await fetchVideoFile(SAMPLE.src, SAMPLE.name, {
+        signal: controller.signal,
+        onProgress: (done, total) => {
+          if (!controller.signal.aborted) {
+            setProgress({ phase: 'fetch', step: 0, steps: 3, done, total });
+          }
+        },
+      });
+    } catch (err) {
+      if (!controller.signal.aborted && err.name !== 'AbortError') {
+        setError('The sample video could not be loaded. Open a folder or a video instead.');
+        setStatus('idle');
+        setProgress(null);
+      }
+      if (extractRef.current === controller) extractRef.current = null;
+      return;
+    }
+
+    if (controller.signal.aborted) return;
+    // acceptVideo takes it from here, including replacing this controller.
+    extractRef.current = null;
+    acceptVideo(file, { sample: true });
+  }, [acceptVideo]);
+
+  useEffect(() => {
+    // Deferred past first paint: several megabytes and an extraction pass should
+    // not compete with rendering the page.
+    const start = () => loadSample();
+    const idle = typeof requestIdleCallback === 'function';
+    const handle = idle ? requestIdleCallback(start, { timeout: 1000 }) : setTimeout(start, 200);
+    return () => (idle ? cancelIdleCallback(handle) : clearTimeout(handle));
+    // Runs once; loadSample is stable enough for the mount pass and a rerun
+    // would be refused by the extractRef guard anyway.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openWithPicker = useCallback(async () => {
+    try {
+      const picked = await pickDirectory();
+      setSavedFolder(picked.handle);
+      acceptFrames(picked.frames, picked.name, picked.handle);
+    } catch (err) {
+      // AbortError just means the picker was dismissed.
+      if (err.name !== 'AbortError') setError(err.message);
+    }
+  }, [acceptFrames]);
+
+  const reopenSaved = useCallback(async () => {
+    try {
+      if (!(await ensureReadPermission(savedFolder))) {
+        await forgetHandle();
+        setSavedFolder(null);
+        return;
+      }
+      acceptFrames(await readHandleFrames(savedFolder), savedFolder.name, savedFolder);
+    } catch (err) {
+      await forgetHandle();
+      setSavedFolder(null);
+      setError('That folder could not be opened again. Pick it once more.');
+    }
+  }, [acceptFrames, savedFolder]);
+
+  const rescan = useCallback(async () => {
+    if (!handle) return;
+    try {
+      if (!(await ensureReadPermission(handle))) return;
+      acceptFrames(await readHandleFrames(handle), folder, handle);
+    } catch (err) {
+      setError(err.message);
+    }
+  }, [acceptFrames, folder, handle]);
+
+  const onDrop = useCallback(
+    async (event) => {
+      event.preventDefault();
+      try {
+        const dropped = await framesFromDataTransfer(event.dataTransfer);
+        if (!dropped) {
+          setError('Drop photos, a folder of them, or a video.');
+          return;
+        }
+        if (dropped.video) {
+          acceptVideo(dropped.video);
+          return;
+        }
+        if (dropped.handle) setSavedFolder(dropped.handle);
+        acceptFrames(dropped.frames, dropped.name, dropped.handle);
+      } catch (err) {
+        setError(err.message);
+      }
+    },
+    [acceptFrames, acceptVideo]
+  );
+
+  const onFileInput = useCallback(
+    (event) => {
+      const picked = event.target.files;
+      if (!picked || !picked.length) return;
+      acceptFrames(framesFromFileList(picked), folderNameFromFileList(picked), null);
+    },
+    [acceptFrames]
+  );
+
+  // Clicking the zone opens one picker that takes either, so it has to sort
+  // out which was chosen. A video comes alone; photos come in a heap.
+  const onPickInput = useCallback(
+    (event) => {
+      const picked = Array.from(event.target.files || []);
+      // Cleared so choosing the same files again still fires a change.
+      event.target.value = '';
+      if (!picked.length) return;
+
+      const video = picked.find(isVideo);
+      if (video) {
+        acceptVideo(video);
+        return;
+      }
+
+      const picks = framesFromFileList(picked);
+      acceptFrames(picks, describePicks(picks), null, 'photos');
+    },
+    [acceptFrames, acceptVideo]
+  );
+
+  // Chromium can hand over a re-openable handle; everywhere else falls back to
+  // the plain folder upload. Either way it is the same button.
+  const openFolder = useCallback(() => {
+    if (canPickDirectory) {
+      openWithPicker();
+      return;
+    }
+    if (folderInputRef.current) folderInputRef.current.click();
+  }, [canPickDirectory, openWithPicker]);
+
+  // --- export ------------------------------------------------------------
+
+  const startExport = useCallback(() => {
+    setError(null);
+    setResult(null);
+    setStatus('exporting');
+    setProgress({ phase: 'export', done: 0, total: last - first + 1 });
+    stackerRef.current.exportImage({
+      power,
+      minOpacity: minOpacity / 100,
+      first,
+      last,
+      scale,
+      rotation,
+    });
+  }, [first, last, minOpacity, power, rotation, scale]);
+
+  const hasFrames = frames.length > 0;
+  const totalFrames = hasFrames ? frames.length : SAMPLE.frames;
+  const selected = last - first + 1;
+  const turned = rotation === 90 || rotation === 270;
+  const hasDimensions = natural.width > 0 && natural.height > 0;
+  const outWidth = hasDimensions
+    ? Math.max(1, Math.round((turned ? natural.height : natural.width) * scale))
+    : null;
+  const outHeight = hasDimensions
+    ? Math.max(1, Math.round((turned ? natural.width : natural.height) * scale))
+    : null;
+  const previewScale = natural.width ? preview.width / natural.width : 1;
+  const displayPreview = hasPreview ? preview : SAMPLE.preview;
+  const progressPercent = progress
+    ? Math.max(
+        0,
+        Math.min(
+          100,
+          (((progress.step || 0) +
+            (progress.total ? progress.done / progress.total : 0)) /
+            (progress.steps || 1)) *
+            100
+        )
+      )
+    : 0;
+
+  const scaleOptions = [
+    { label: 'Full size', value: 1 },
+    { label: 'Half', value: 0.5 },
+    { label: 'Preview size', value: hasDimensions ? previewScale : null },
+  ];
+
+  return (
+    <div className="app">
+      <Space h={2} />
+
+      {/* The zone takes either kind of source, by drop or by click -- it is a
+          label rather than a jbx Dropzone (a div) so the click opens the
+          picker with no handler of its own. The input is kept off the flow
+          rather than stretched over the zone the way jbx does it: a file
+          input under the pointer would swallow the drop. */}
+      <label
+        className="jbx-dropzone"
+        style={{ position: 'relative' }}
+        onDrop={onDrop}
+        onDragOver={(event) => event.preventDefault()}
+      >
+        <input
+          type="file"
+          multiple
+          accept="image/jpeg,image/png,video/*"
+          style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+          onChange={onPickInput}
+        />
+        {/* Both lines are one block, the way img2css groups them, so the zone
+            centres the pair instead of spreading them as two flex items. */}
+        <div>
+          <Text>Drop photos or a video here</Text>
+          <Text>or click to select</Text>
+        </div>
+      </label>
+
+      <Space h={0.5} />
+
+      {/* Whole folders are the quieter case, so they sit under the zone as a
+          link rather than competing with it. */}
+      <SmallText>
+        <button type="button" className="jbx-a" style={LINK_STYLE} onClick={openFolder}>
+          Open a folder instead
+        </button>
+        {savedFolder && untouched && (
+          <>
+            <Space inline w={1} />
+            <button type="button" className="jbx-a" style={LINK_STYLE} onClick={reopenSaved}>
+              Reopen “{savedFolder.name}”
+            </button>
+          </>
+        )}
+      </SmallText>
+
+      <input
+        ref={folderInputRef}
+        type="file"
+        webkitdirectory=""
+        directory=""
+        multiple
+        accept="image/jpeg,image/png"
+        style={{ display: 'none' }}
+        onChange={onFileInput}
+      />
+
+      {error && (
+        <>
+          <Space h={1} />
+          <Text style={{ color: 'var(--accent-color)' }}>{error}</Text>
+        </>
+      )}
+
+      <Space h={1} />
+
+      <div
+        className={`stage${mediaLoading ? ' -loading' : ''}`}
+        aria-busy={Boolean(progress)}
+        style={{
+          '--preview-display-width': `${
+            (turned ? displayPreview.height : displayPreview.width) /
+            (displayPreview.density || 1)
+          }px`,
+          // Lets the stylesheet trade width for height against a viewport cap,
+          // which is what keeps a portrait sequence from pushing the controls
+          // off the bottom of the screen.
+          '--preview-aspect':
+            (turned ? displayPreview.height : displayPreview.width) /
+            (turned ? displayPreview.width : displayPreview.height),
+        }}
+      >
+        <img
+          src={SAMPLE.poster}
+          alt=""
+          aria-hidden="true"
+          className={`preview-poster${hasPreview ? ' -hidden' : ''}`}
+        />
+        <canvas
+          ref={canvasRef}
+          className={`preview-canvas${hasPreview ? '' : ' -hidden'}`}
+        />
+        {progress && (
+          <div className="stage-status" role="status" aria-live="polite">
+            <SmallText>{progressLabel(progress)}</SmallText>
+            <div className="bar">
+              <div
+                className="bar-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <Space h={1} />
+      <Card disabled={controlsDisabled}>
+        <HeaderH4>Look</HeaderH4>
+        <Space h={0.5} />
+
+        <Text>
+          Power <strong>{power.toFixed(1)}</strong>
+        </Text>
+        <Space h={0.25} />
+        <Range
+          min={0.5}
+          max={12}
+          step={0.1}
+          value={power}
+          disabled={controlsDisabled}
+          onChange={(event) => setPower(Number(event.target.value))}
+        />
+        <Space h={1} />
+
+        <Text>
+          Min opacity <strong>{minOpacity}%</strong>
+        </Text>
+        <Space h={0.25} />
+        <Range
+          min={0}
+          max={100}
+          step={1}
+          value={minOpacity}
+          disabled={controlsDisabled}
+          onChange={(event) => setMinOpacity(Number(event.target.value))}
+        />
+        <Space h={1} />
+
+        <Text>
+          Frames <strong>{selected}</strong> of {totalFrames}
+        </Text>
+        <Space h={0.25} />
+        <FrameRange
+          first={first}
+          last={last}
+          max={totalFrames - 1}
+          disabled={controlsDisabled}
+          onFirstChange={(event) =>
+            setFirst(Math.min(Number(event.target.value), last))
+          }
+          onLastChange={(event) =>
+            setLast(Math.max(Number(event.target.value), first))
+          }
+        />
+
+        <Space h={1} />
+        <Text>
+          Rotation <strong>{rotation}°</strong>
+        </Text>
+        <Space h={0.25} />
+        <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
+          <Button
+            disabled={controlsDisabled}
+            onClick={() => turn(-90)}
+            aria-label="Rotate left 90 degrees"
+          >
+            ⟲ Left
+          </Button>
+          <Button
+            disabled={controlsDisabled}
+            onClick={() => turn(90)}
+            aria-label="Rotate right 90 degrees"
+          >
+            ⟳ Right
+          </Button>
+        </Inline>
+      </Card>
+
+      <Space h={1} />
+
+      <Card>
+        <HeaderH4>Export</HeaderH4>
+        <Space h={0.5} />
+
+        <div
+          className={`control-group${controlsDisabled ? ' -disabled' : ''}`}
+          inert={controlsDisabled ? true : undefined}
+          aria-disabled={controlsDisabled || undefined}
+        >
+          <Tabs>
+            {scaleOptions.map((option) => (
+              <Tab
+                key={option.label}
+                active={option.value !== null && scale === option.value}
+                aria-disabled={controlsDisabled || option.value === null}
+                onClick={() => {
+                  if (!controlsDisabled && option.value !== null) setScale(option.value);
+                }}
+              >
+                {option.label}
+              </Tab>
+            ))}
+          </Tabs>
+          <Space h={0.5} />
+          <SmallText>
+            {outWidth} × {outHeight} JPEG, quality 95.
+            {hasDimensions && scale === 1
+              ? ' Full size is slower because every frame is decoded again.'
+              : ''}
+          </SmallText>
+
+          {/* Frames extracted from a video are canvas JPEGs with no metadata
+              of their own, so there is nothing to offer. */}
+          {hasFrames && source !== 'video' && (
+            <>
+              <Space h={1} />
+              <Checkbox
+                label="Preserve EXIF from the first frame"
+                checked={copyExif}
+                onChange={setCopyExif}
+              />
+              <Space h={0.25} />
+              <SmallText>
+                Keeps the camera, lens, date and shooting settings from the first
+                frame.
+              </SmallText>
+            </>
+          )}
+        </div>
+
+        <Space h={1} />
+        <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
+          <Button onClick={startExport} disabled={controlsDisabled}>
+            {status === 'exporting' ? 'Stacking…' : 'Export JPEG'}
+          </Button>
+          {status === 'exporting' && (
+            <Button onClick={() => stackerRef.current.cancelExport()}>Cancel</Button>
+          )}
+        </Inline>
+
+        {result && (
+          <>
+            <Space h={1} />
+            <Text>
+              Saved {result.width} × {result.height} from {result.frames} frames
+              {result.exifApplied ? ', preserving the first frame EXIF' : ''}.
+            </Text>
+          </>
+        )}
+      </Card>
+
+      {hasFrames && (
+        <>
+          <Space h={1} />
+
+          {/* Everything descriptive lives down here. None of it is needed to
+              work the controls, and the space above them is worth more. */}
+          <Card>
+            <HeaderH4>Source</HeaderH4>
+            <Space h={0.5} />
+            <dl className="stats">
+              <dt>{SOURCE_LABEL[source]}</dt>
+              <dd>
+                {folder}
+                {isSample ? ' (sample)' : ''}
+              </dd>
+
+              <dt>Frames</dt>
+              <dd>
+                {frames.length}
+                {selected === frames.length ? '' : `, stacking ${selected}`}
+              </dd>
+
+              <dt>Size</dt>
+              <dd>
+                {natural.width} × {natural.height}
+              </dd>
+
+              {source === 'video' && videoSummary && (
+                <>
+                  <dt>Sampling</dt>
+                  <dd>
+                    {videoSummary.step > 1
+                      ? `every ${ordinal(videoSummary.step)} frame of ${videoSummary.total}`
+                      : 'every frame'}
+                    , at {formatFps(videoSummary.fps)} fps
+                  </dd>
+                </>
+              )}
+            </dl>
+
+            {handle && (
+              <>
+                <Space h={1} />
+                <Button onClick={rescan} disabled={status !== 'ready'}>
+                  Rescan
+                </Button>
+                <Space h={0.5} />
+                <SmallText>
+                  Re-reads the folder and includes any new frames.
+                </SmallText>
+              </>
+            )}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
