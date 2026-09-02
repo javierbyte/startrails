@@ -24,7 +24,8 @@ export const metadata = {
       {
         url: THUMBNAIL,
         width: 1200,
-        height: 600,
+        height: 630,
+        alt: TITLE,
       },
     ],
   },

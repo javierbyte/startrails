@@ -1,11 +1,19 @@
-import { A, Container, HeaderH3, MainHeader, MoreExperiments, Space, Text } from 'jbx';
+import {
+  A,
+  Container,
+  HeaderH3,
+  MainHeader,
+  MoreExperiments,
+  Space,
+  Text,
+} from 'jbx';
 
 import StarTrailsApp from '../components/StarTrailsApp.jsx';
 
 export default function Page() {
   return (
     <Container>
-      <MainHeader>Star Trails</MainHeader>
+      <MainHeader>star-trails</MainHeader>
       <Space h={1} />
       <Text>
         Stack timelapse photos or a video into one star trail image. Photo
