@@ -22,13 +22,15 @@
    and pointer behavior; only their duplicate rails are replaced here. */
 .frame-range {
   position: relative;
-  height: calc(var(--size) * 2);
+  height: var(--range-touch-target);
+  isolation: isolate;
 }
 
 .frame-range::before,
 .frame-range::after {
   content: '';
   position: absolute;
+  z-index: 0;
   top: 50%;
   height: var(--size);
   transform: translateY(-50%);
@@ -48,11 +50,43 @@
   background-color: var(--accent-color);
 }
 
+/* The coloured interval is also a handle: dragging it moves both endpoints
+   together. Its touch-sized hit area overlaps the endpoint thumbs without
+   changing the visible rail. */
+.frame-range-selection {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: calc(var(--frame-first) - var(--size) * 0.5);
+  right: calc(100% - var(--frame-last) - var(--size) * 0.5);
+  height: var(--range-touch-target);
+  min-width: var(--size);
+  padding: 0;
+  transform: translateY(-50%);
+  cursor: grab;
+  touch-action: none;
+}
+
+.frame-range-selection:active {
+  cursor: grabbing;
+}
+
+.frame-range-selection[aria-disabled='true'] {
+  pointer-events: none;
+}
+
+.frame-range-selection:focus-visible {
+  outline: 3px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
 .frame-range .jbx-range {
   position: absolute;
   top: 50%;
-  left: 0;
-  z-index: 1;
+  /* JBX widens the native input so its 44px thumb can still reach the visual
+     rail ends. Preserve that compensation when taking the range out of flow. */
+  left: calc(var(--range-thumb-overhang) * -1);
+  z-index: 2;
   margin: 0;
   transform: translateY(-50%);
   background-color: transparent;
@@ -60,25 +94,25 @@
 }
 
 .frame-range .jbx-range:last-child {
-  z-index: 2;
+  z-index: 3;
 }
 
 /* When the interval collapses, leave the handle that can expand back toward
    the middle on top. The focused handle always wins during an active drag. */
 .frame-range.-first-on-top .jbx-range:first-child {
-  z-index: 3;
-}
-
-.frame-range .jbx-range:focus {
   z-index: 4;
 }
 
+.frame-range .jbx-range:focus {
+  z-index: 5;
+}
+
 .frame-range .jbx-range::-webkit-slider-runnable-track {
-  background-color: transparent;
+  background: transparent;
 }
 
 .frame-range .jbx-range::-moz-range-track {
-  background-color: transparent;
+  background: transparent;
 }
 
 .frame-range .jbx-range::-webkit-slider-thumb {
@@ -97,6 +131,12 @@
 
 .frame-range .jbx-range:focus-visible::-moz-range-thumb {
   box-shadow: 0 0 0 3px var(--accent-color);
+}
+
+.frame-play-button {
+  flex: none;
+  width: var(--control-height);
+  padding: 0;
 }
 
 /* The stacked preview. The canvas is always in the DOM, because it can only be

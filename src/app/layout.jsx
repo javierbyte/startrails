@@ -1,5 +1,5 @@
-import './globals.css';
 import 'jbx/main.css';
+import './globals.css';
 
 import { GoogleAnalytics } from '@next/third-parties/google';
 

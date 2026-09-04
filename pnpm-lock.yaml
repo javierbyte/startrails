@@ -12,8 +12,8 @@ importers:
         specifier: 16.3.4
         version: 16.3.4(next@16.3.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)
       jbx:
-        specifier: ^2.15.0
-        version: 2.15.0(react@19.2.8)
+        specifier: ^2.16.1
+        version: 2.16.1(react@19.2.8)
       next:
         specifier: 16.3.4
         version: 16.3.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -270,8 +270,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  jbx@2.15.0:
-    resolution: {integrity: sha512-sbXjzhVnb33UN90eYI8UCE2HGW8pOeZ7lymqtEWtSB8h2jlGvHr3hrKrriZU8WWTItCc6SmQrLQo5FbXMIV+8g==}
+  jbx@2.16.1:
+    resolution: {integrity: sha512-Xv5PYP09TbxY4eKBkmaYaoLndIJxYbiTzBznvY3cKMW25HSHL/JghjUFL7t80f/wrMe/T+OEwcdRghfywr0HSw==}
     engines: {node: '>=18'}
     peerDependencies:
       react: ^17 || ^18 || ^19
@@ -517,7 +517,7 @@ snapshots:
   detect-libc@2.1.2:
     optional: true
 
-  jbx@2.15.0(react@19.2.8):
+  jbx@2.16.1(react@19.2.8):
     dependencies:
       react: 19.2.8
 

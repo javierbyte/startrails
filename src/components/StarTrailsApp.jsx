@@ -48,8 +48,12 @@ const SAMPLE = {
   preview: { width: 893, height: 1340, density: 2 },
 };
 
-const DEFAULTS = { power: 2, minOpacity: 0 };
+const DEFAULTS = { power: 1, minOpacity: 0 };
 const INTRO_DURATION = 1000;
+const PLAYBACK_INTERVAL = 1000 / 15;
+const POWER_MIN = 0.1;
+const POWER_MAX = 10;
+const POWER_SLIDER_STEPS = 1000;
 
 const SOURCE_LABEL = { video: 'Video', photos: 'Photos', folder: 'Folder' };
 
@@ -73,6 +77,20 @@ function describePicks(picks) {
 
 function formatFps(fps) {
   return fps.toFixed(2).replace(/\.?0+$/, '');
+}
+
+// Keep the useful low-power end physically wide while still offering the much
+// stronger values at the end of the control. The input itself stays linear;
+// only the value exposed to the stacker follows a quadratic curve.
+function powerFromSlider(value) {
+  const position = value / POWER_SLIDER_STEPS;
+  const power = POWER_MIN + (POWER_MAX - POWER_MIN) * position ** 2;
+  return Math.round(power * 10) / 10;
+}
+
+function sliderFromPower(power) {
+  const position = Math.sqrt((power - POWER_MIN) / (POWER_MAX - POWER_MIN));
+  return Math.round(position * POWER_SLIDER_STEPS);
 }
 
 function Card({ children, disabled = false }) {
@@ -107,17 +125,113 @@ function progressLabel(progress) {
   }
 }
 
-function FrameRange({ disabled, first, last, max, onFirstChange, onLastChange }) {
+function FrameRange({
+  disabled,
+  first,
+  last,
+  max,
+  onFirstChange,
+  onLastChange,
+  onWindowChange,
+}) {
+  const rangeRef = useRef(null);
+  const dragRef = useRef(null);
   const scale = Math.max(max, 1);
+  const canMoveWindow = !disabled && last - first < max;
+
+  const moveWindow = useCallback(
+    (nextFirst) => {
+      const width = last - first;
+      const clampedFirst = Math.max(0, Math.min(nextFirst, max - width));
+      onWindowChange(clampedFirst, clampedFirst + width);
+    },
+    [first, last, max, onWindowChange]
+  );
+
+  const onSelectionPointerDown = (event) => {
+    if (!canMoveWindow) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      first,
+      width: last - first,
+    };
+  };
+
+  const onSelectionPointerMove = (event) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const railWidth = rangeRef.current?.getBoundingClientRect().width || 1;
+    const frameDelta = Math.round(((event.clientX - drag.startX) / railWidth) * max);
+    const nextFirst = Math.max(0, Math.min(drag.first + frameDelta, max - drag.width));
+    onWindowChange(nextFirst, nextFirst + drag.width);
+  };
+
+  const finishSelectionDrag = (event) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const onSelectionKeyDown = (event) => {
+    let nextFirst;
+    switch (event.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
+        nextFirst = first - 1;
+        break;
+      case 'ArrowRight':
+      case 'ArrowUp':
+        nextFirst = first + 1;
+        break;
+      case 'PageDown':
+        nextFirst = first - 10;
+        break;
+      case 'PageUp':
+        nextFirst = first + 10;
+        break;
+      case 'Home':
+        nextFirst = 0;
+        break;
+      case 'End':
+        nextFirst = max - (last - first);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    moveWindow(nextFirst);
+  };
 
   return (
     <div
+      ref={rangeRef}
       className={`frame-range${first === last && first > max / 2 ? ' -first-on-top' : ''}`}
       style={{
         '--frame-first': `${(first / scale) * 100}%`,
         '--frame-last': `${(last / scale) * 100}%`,
       }}
     >
+      <div
+        className="frame-range-selection"
+        role="slider"
+        tabIndex={canMoveWindow ? 0 : -1}
+        aria-label="Selected frame range"
+        aria-valuemin={1}
+        aria-valuemax={max - (last - first) + 1}
+        aria-valuenow={first + 1}
+        aria-valuetext={`Frames ${first + 1} through ${last + 1}`}
+        aria-disabled={!canMoveWindow}
+        onPointerDown={onSelectionPointerDown}
+        onPointerMove={onSelectionPointerMove}
+        onPointerUp={finishSelectionDrag}
+        onPointerCancel={finishSelectionDrag}
+        onKeyDown={onSelectionKeyDown}
+      />
       <Range
         aria-label="First frame"
         aria-valuetext={`Frame ${first + 1} of ${max + 1}`}
@@ -159,6 +273,7 @@ export default function StarTrailsApp() {
   const cacheReadyRef = useRef(false);
   const skipNextPreviewRef = useRef(false);
   const folderInputRef = useRef(null);
+  const playbackRef = useRef(null);
 
   const [frames, setFrames] = useState([]);
   const [folder, setFolder] = useState(null);
@@ -177,10 +292,14 @@ export default function StarTrailsApp() {
   const [preview, setPreview] = useState(SAMPLE.preview);
   const [hasPreview, setHasPreview] = useState(false);
 
-  const [power, setPower] = useState(DEFAULTS.power);
+  const [powerSlider, setPowerSlider] = useState(() =>
+    sliderFromPower(DEFAULTS.power)
+  );
+  const power = powerFromSlider(powerSlider);
   const [minOpacity, setMinOpacity] = useState(DEFAULTS.minOpacity);
   const [first, setFirst] = useState(0);
   const [last, setLast] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   const [rotation, setRotation] = useState(0);
   const [scale, setScale] = useState(1);
@@ -204,6 +323,14 @@ export default function StarTrailsApp() {
   // it loads on its own, so gating on frames.length would hide Reopen a second
   // after arrival, which is exactly when it is wanted.
   const untouched = isSample || !frames.length;
+
+  const stopPlayback = useCallback(() => {
+    if (playbackRef.current !== null) {
+      clearInterval(playbackRef.current);
+      playbackRef.current = null;
+    }
+    setIsPlaying(false);
+  }, []);
 
   // --- worker plumbing ---------------------------------------------------
 
@@ -410,6 +537,16 @@ export default function StarTrailsApp() {
     animationFrame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animationFrame);
   }, [frames.length, status]);
+
+  useEffect(() => () => {
+    if (playbackRef.current !== null) clearInterval(playbackRef.current);
+  }, []);
+
+  // Loading a different source or starting an export invalidates the current
+  // frame indices, so playback cannot be allowed to outlive the ready state.
+  useEffect(() => {
+    if (status !== 'ready' && playbackRef.current !== null) stopPlayback();
+  }, [status, stopPlayback]);
 
   const turn = useCallback((degrees) => {
     setRotation((current) => (current + degrees + 360) % 360);
@@ -688,6 +825,7 @@ export default function StarTrailsApp() {
   // --- export ------------------------------------------------------------
 
   const startExport = useCallback(() => {
+    stopPlayback();
     setError(null);
     setResult(null);
     setStatus('exporting');
@@ -700,11 +838,58 @@ export default function StarTrailsApp() {
       scale,
       rotation,
     });
-  }, [first, last, minOpacity, power, rotation, scale]);
+  }, [first, last, minOpacity, power, rotation, scale, stopPlayback]);
 
   const hasFrames = frames.length > 0;
   const totalFrames = hasFrames ? frames.length : SAMPLE.frames;
   const selected = last - first + 1;
+
+  const togglePlayback = useCallback(() => {
+    if (playbackRef.current !== null) {
+      stopPlayback();
+      return;
+    }
+
+    const width = last - first;
+    const finalFirst = totalFrames - 1 - width;
+    if (finalFirst <= 0) return;
+
+    setFirst(0);
+    setLast(width);
+    setIsPlaying(true);
+
+    let nextFirst = 1;
+    playbackRef.current = setInterval(() => {
+      setFirst(nextFirst);
+      setLast(nextFirst + width);
+      nextFirst = nextFirst >= finalFirst ? 0 : nextFirst + 1;
+    }, PLAYBACK_INTERVAL);
+  }, [first, last, stopPlayback, totalFrames]);
+
+  const changeFirst = useCallback(
+    (value) => {
+      stopPlayback();
+      setFirst(Math.min(value, last));
+    },
+    [last, stopPlayback]
+  );
+
+  const changeLast = useCallback(
+    (value) => {
+      stopPlayback();
+      setLast(Math.max(value, first));
+    },
+    [first, stopPlayback]
+  );
+
+  const changeFrameWindow = useCallback(
+    (nextFirst, nextLast) => {
+      stopPlayback();
+      setFirst(nextFirst);
+      setLast(nextLast);
+    },
+    [stopPlayback]
+  );
   const turned = rotation === 90 || rotation === 270;
   const hasDimensions = natural.width > 0 && natural.height > 0;
   const outWidth = hasDimensions
@@ -846,17 +1031,53 @@ export default function StarTrailsApp() {
         <HeaderH4>Look</HeaderH4>
         <Space h={0.5} />
 
+        <Inline
+          style={{
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
+          }}
+        >
+          <Text>
+            Frames <strong>{selected}</strong> of {totalFrames}
+          </Text>
+          <Button
+            className="jbx-button frame-play-button"
+            disabled={controlsDisabled || selected >= totalFrames}
+            onClick={togglePlayback}
+            aria-label={
+              isPlaying ? 'Stop frame range playback' : 'Play frame range'
+            }
+            title={isPlaying ? 'Stop frame range playback' : 'Play frame range'}
+          >
+            {isPlaying ? '■' : '▶'}
+          </Button>
+        </Inline>
+        <Space h={0.25} />
+        <FrameRange
+          first={first}
+          last={last}
+          max={totalFrames - 1}
+          disabled={controlsDisabled}
+          onFirstChange={(event) => changeFirst(Number(event.target.value))}
+          onLastChange={(event) => changeLast(Number(event.target.value))}
+          onWindowChange={changeFrameWindow}
+        />
+
+        <Space h={1} />
         <Text>
-          Power <strong>{power.toFixed(1)}</strong>
+          Decay <strong>{power.toFixed(1)}</strong>
         </Text>
         <Space h={0.25} />
         <Range
-          min={0.5}
-          max={12}
-          step={0.1}
-          value={power}
+          aria-label="Decay"
+          aria-valuetext={power.toFixed(1)}
+          min={0}
+          max={POWER_SLIDER_STEPS}
+          step={1}
+          value={powerSlider}
           disabled={controlsDisabled}
-          onChange={(event) => setPower(Number(event.target.value))}
+          onChange={(event) => setPowerSlider(Number(event.target.value))}
         />
         <Space h={1} />
 
@@ -872,25 +1093,6 @@ export default function StarTrailsApp() {
           disabled={controlsDisabled}
           onChange={(event) => setMinOpacity(Number(event.target.value))}
         />
-        <Space h={1} />
-
-        <Text>
-          Frames <strong>{selected}</strong> of {totalFrames}
-        </Text>
-        <Space h={0.25} />
-        <FrameRange
-          first={first}
-          last={last}
-          max={totalFrames - 1}
-          disabled={controlsDisabled}
-          onFirstChange={(event) =>
-            setFirst(Math.min(Number(event.target.value), last))
-          }
-          onLastChange={(event) =>
-            setLast(Math.max(Number(event.target.value), first))
-          }
-        />
-
         <Space h={1} />
         <Text>
           Rotation <strong>{rotation}°</strong>

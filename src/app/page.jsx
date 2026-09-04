@@ -12,7 +12,7 @@ import StarTrailsApp from '../components/StarTrailsApp.jsx';
 
 export default function Page() {
   return (
-    <Container>
+    <Container as="main">
       <MainHeader>star-trails</MainHeader>
       <Space h={1} />
       <Text>
