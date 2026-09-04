@@ -30,7 +30,7 @@ import {
   recallHandle,
   supportsDirectoryPicker,
 } from '../lib/folder.js';
-import { fetchVideoFile, framesFromVideoFile, isVideo } from '../lib/video.js';
+import { loadSampleFrames, framesFromVideoFile, isVideo } from '../lib/video.js';
 
 // The page loads this by itself so the controls have something real under them
 // from the start: a still gallery could only show finished stacks, where the
@@ -40,7 +40,6 @@ import { fetchVideoFile, framesFromVideoFile, isVideo } from '../lib/video.js';
 // The page is served at /startrails with no trailing slash, so a relative URL
 // would resolve against the site root.
 const SAMPLE = {
-  src: `${BASE_PATH}/example-startrail.mp4`,
   poster: `${BASE_PATH}/example-startrail-preview.jpg`,
   name: 'example-startrail.mp4',
   frames: 84,
@@ -108,12 +107,10 @@ function Card({ children, disabled = false }) {
 function progressLabel(progress) {
   if (!progress) return '';
   switch (progress.phase) {
-    case 'fetch':
+    case 'sample':
       return progress.total
-        ? `Loading the sample video ${(progress.done / 1e6).toFixed(1)} / ${(
-            progress.total / 1e6
-          ).toFixed(1)} MB`
-        : 'Loading the sample video';
+        ? `Loading sample previews ${progress.done} / ${progress.total}`
+        : 'Loading sample previews';
     case 'extract':
       return `Extracting frames ${progress.done} / ${progress.total}`;
     case 'load':
@@ -307,9 +304,9 @@ export default function StarTrailsApp() {
 
   const [status, setStatus] = useState('extracting');
   const [progress, setProgress] = useState({
-    phase: 'fetch',
+    phase: 'sample',
     step: 0,
-    steps: 3,
+    steps: 2,
     done: 0,
     total: 0,
   });
@@ -370,6 +367,7 @@ export default function StarTrailsApp() {
         }
       }
 
+      if (!message.isCurrent()) return;
       setStatus('ready');
       setProgress(null);
       setResult({
@@ -460,16 +458,17 @@ export default function StarTrailsApp() {
         ) {
           break;
         }
+        previewRef.current = { busy: false, queued: null, sent: null };
         setError(message.message);
         // A failed load has no complete preview cache to restack. Export errors
         // can return to the already-loaded preview, but aspect-ratio/decode
         // errors must leave the controls disabled until another folder opens.
-        if (message.phase === 'load') {
+        if (message.phase === 'load' || message.phase === 'worker') {
           pendingLoadRef.current = null;
           cacheReadyRef.current = false;
         }
         setStatus(
-          message.phase === 'load'
+          (message.phase === 'load' || message.phase === 'worker')
             ? 'idle'
             : cacheReadyRef.current && frames.length
               ? 'ready'
@@ -489,8 +488,11 @@ export default function StarTrailsApp() {
       canvas: canvasRef.current,
       onEvent: (message) => eventRef.current(message),
     });
-    // Deliberately never torn down: a canvas can only be handed to a worker
-    // once, so a remount could not rebuild this.
+    return () => {
+      extractRef.current?.abort();
+      stackerRef.current?.destroy();
+      stackerRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -574,6 +576,7 @@ export default function StarTrailsApp() {
       // the rest of the work.
       pendingLoadRef.current = null;
       stackerRef.current.cancelLoad();
+      cacheReadyRef.current = false;
 
       if (!nextFrames || !nextFrames.length) {
         setError(
@@ -590,8 +593,8 @@ export default function StarTrailsApp() {
 
       const requestId = ++loadRequestRef.current;
       const intro = Boolean(details.isSample);
-      const step = kind === 'video' ? (intro ? 2 : 1) : 0;
-      const steps = kind === 'video' ? (intro ? 3 : 2) : 1;
+      const step = kind === 'video' ? 1 : 0;
+      const steps = kind === 'video' ? 2 : 1;
       pendingLoadRef.current = {
         requestId,
         step,
@@ -623,29 +626,31 @@ export default function StarTrailsApp() {
           last: intro ? 0 : nextFrames.length - 1,
           rotation,
         },
-        requestId
+        requestId,
+        details.source
       );
     },
     [frames.length, minOpacity, power, rotation]
   );
 
   const acceptVideo = useCallback(
-    async (file, { sample = false } = {}) => {
+    async (file) => {
       if (extractRef.current) extractRef.current.abort();
       const controller = new AbortController();
       extractRef.current = controller;
       pendingLoadRef.current = null;
       stackerRef.current.cancelLoad();
+      cacheReadyRef.current = false;
 
       setError(null);
       setResult(null);
       setStatus('extracting');
-      const step = sample ? 1 : 0;
-      const steps = sample ? 3 : 2;
+      const step = 0;
+      const steps = 2;
       setProgress({ phase: 'extract', step, steps, done: 0, total: 1 });
 
       try {
-        const { frames: extracted, summary } = await framesFromVideoFile(file, {
+        const { frames: extracted, summary, source: descriptor } = await framesFromVideoFile(file, {
           signal: controller.signal,
           onProgress: (done, total) => {
             if (!controller.signal.aborted) {
@@ -656,7 +661,7 @@ export default function StarTrailsApp() {
         if (controller.signal.aborted) return;
         acceptFrames(extracted, file.name, null, 'video', {
           videoSummary: summary,
-          isSample: sample,
+          source: descriptor,
         });
       } catch (err) {
         // A newer drop cancelled this one; it owns the UI now.
@@ -671,10 +676,8 @@ export default function StarTrailsApp() {
     [acceptFrames, frames.length]
   );
 
-  // The sample clip, fetched and extracted on the way in so the controls are
-  // live without anyone having to find footage first. It shares extractRef with
-  // every other input path, so opening a folder or a video mid-download aborts
-  // both the fetch and the extraction and takes over.
+  // Prebuilt demo previews share the source-loading cancellation controller.
+  // The original video is fetched lazily by the renderer.
   const loadSample = useCallback(async () => {
     // A user can select a folder in the short idle window before this deferred
     // task runs. Pending or committed user frames take precedence just like an
@@ -684,37 +687,33 @@ export default function StarTrailsApp() {
     extractRef.current = controller;
 
     setStatus('extracting');
-    setProgress({ phase: 'fetch', step: 0, steps: 3, done: 0, total: 0 });
+    setProgress({ phase: 'sample', step: 0, steps: 2, done: 0, total: 0 });
 
-    let file;
     try {
-      file = await fetchVideoFile(SAMPLE.src, SAMPLE.name, {
+      const { frames: sampleFrames, summary, source: descriptor } = await loadSampleFrames(BASE_PATH, {
         signal: controller.signal,
         onProgress: (done, total) => {
-          if (!controller.signal.aborted) {
-            setProgress({ phase: 'fetch', step: 0, steps: 3, done, total });
-          }
+          if (!controller.signal.aborted) setProgress({ phase: 'sample', step: 0, steps: 2, done, total });
         },
       });
+      if (controller.signal.aborted) return;
+      extractRef.current = null;
+      acceptFrames(sampleFrames, SAMPLE.name, null, 'video', {
+        isSample: true, videoSummary: summary, source: descriptor,
+      });
     } catch (err) {
-      if (!controller.signal.aborted && err.name !== 'AbortError') {
-        setError('The sample video could not be loaded. Open a folder or a video instead.');
-        setStatus('idle');
+      if (!controller.signal.aborted) {
+        setError('The sample previews could not be loaded. Open a folder or a video instead.');
         setProgress(null);
+        setStatus('idle');
       }
+    } finally {
       if (extractRef.current === controller) extractRef.current = null;
-      return;
     }
-
-    if (controller.signal.aborted) return;
-    // acceptVideo takes it from here, including replacing this controller.
-    extractRef.current = null;
-    acceptVideo(file, { sample: true });
-  }, [acceptVideo]);
+  }, [acceptFrames]);
 
   useEffect(() => {
-    // Deferred past first paint: several megabytes and an extraction pass should
-    // not compete with rendering the page.
+    // Let the poster paint before fetching the prepared sample frames.
     const start = () => loadSample();
     const idle = typeof requestIdleCallback === 'function';
     const handle = idle ? requestIdleCallback(start, { timeout: 1000 }) : setTimeout(start, 200);
@@ -828,6 +827,7 @@ export default function StarTrailsApp() {
     stopPlayback();
     setError(null);
     setResult(null);
+    previewRef.current = { busy: false, queued: null, sent: null };
     setStatus('exporting');
     setProgress({ phase: 'export', done: 0, total: last - first + 1 });
     stackerRef.current.exportImage({
@@ -899,7 +899,6 @@ export default function StarTrailsApp() {
     ? Math.max(1, Math.round((turned ? natural.width : natural.height) * scale))
     : null;
   const previewScale = natural.width ? preview.width / natural.width : 1;
-  const displayPreview = hasPreview ? preview : SAMPLE.preview;
   const progressPercent = progress
     ? Math.max(
         0,
@@ -992,15 +991,14 @@ export default function StarTrailsApp() {
         aria-busy={Boolean(progress)}
         style={{
           '--preview-display-width': `${
-            (turned ? displayPreview.height : displayPreview.width) /
-            (displayPreview.density || 1)
+            Math.min(640, (turned ? natural.height : natural.width) / 2)
           }px`,
           // Lets the stylesheet trade width for height against a viewport cap,
           // which is what keeps a portrait sequence from pushing the controls
           // off the bottom of the screen.
           '--preview-aspect':
-            (turned ? displayPreview.height : displayPreview.width) /
-            (turned ? displayPreview.width : displayPreview.height),
+            (turned ? natural.height : natural.width) /
+            (turned ? natural.width : natural.height),
         }}
       >
         <img
@@ -1222,8 +1220,8 @@ export default function StarTrailsApp() {
                   <dd>
                     {videoSummary.step > 1
                       ? `every ${ordinal(videoSummary.step)} frame of ${videoSummary.total}`
-                      : 'every frame'}
-                    , at {formatFps(videoSummary.fps)} fps
+                      : videoSummary.estimated ? 'evenly spaced samples' : 'every frame'}
+                    , at {videoSummary.estimated ? 'approximately ' : ''}{formatFps(videoSummary.fps)} fps
                   </dd>
                 </>
               )}

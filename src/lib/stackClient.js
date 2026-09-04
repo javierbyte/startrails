@@ -1,43 +1,216 @@
-/**
- * Thin wrapper over the stacking worker: owns the worker, hands it the preview
- * canvas once, and turns its messages into callbacks.
- *
- * The canvas can only be transferred a single time, so a stacker instance is
- * tied to one <canvas> element for its whole life.
- */
+import { fetchVideoFile, openVideo } from './video.js';
+import { checkAbort, isCurrent } from './processing.js';
+
+/** Owns source generations, worker jobs, and the one active video decoder. */
 export function createStacker({ canvas, onEvent }) {
-  // Turbopack turns this into a hashed asset URL under the configured basePath,
-  // which is why the worker is referenced this way rather than by a hand-built
-  // path. It copies the file through untouched, so the worker has to be plain
-  // import-free JS -- see the note at the top of stack.worker.js.
-  const worker = new Worker(new URL('../workers/stack.worker.js', import.meta.url), {
-    type: 'module',
-  });
+  const makeWorker = () =>
+    new Worker(new URL('../workers/stack.worker.js', import.meta.url), {
+      type: 'module',
+    });
+  let worker = makeWorker();
+  let generation = 0;
+  let sequence = 0;
+  let source;
+  let loadId;
+  let previewId;
+  let renderId;
+  let timer;
+  let controller;
+  let readerPromise;
+  let destroyed = false;
+  let latestParams;
 
-  worker.onmessage = (event) => onEvent(event.data);
-  worker.onerror = (event) =>
-    onEvent({ type: 'error', phase: 'worker', message: event.message || 'Worker failed' });
-
-  const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
+  function stopRender() {
+    clearTimeout(timer);
+    controller?.abort();
+    controller = null;
+    readerPromise = null;
+    renderId = undefined;
+    worker.postMessage({ type: 'cancelRender', generation });
+  }
+  function startRender(type, params) {
+    stopRender();
+    if (type === 'export') previewId = undefined;
+    renderId = ++sequence;
+    controller = new AbortController();
+    const rect = canvas.getBoundingClientRect();
+    const maxSide = Math.min(
+      1440,
+      Math.max(
+        1,
+        Math.ceil(
+          Math.max(rect.width, rect.height) * (window.devicePixelRatio || 1)
+        )
+      )
+    );
+    worker.postMessage({
+      type,
+      ...params,
+      maxSide,
+      generation,
+      requestId: renderId,
+    });
+  }
+  function scheduleRefinement(params) {
+    clearTimeout(timer);
+    timer = setTimeout(() => startRender('refine', params), 300);
+  }
+  async function provideFrame(message) {
+    const signal = controller.signal;
+    const activeSource = source;
+    try {
+      if (!readerPromise) {
+        readerPromise = (async () => {
+          const file =
+            activeSource.file ||
+            (await fetchVideoFile(activeSource.url, activeSource.name, {
+              signal,
+            }));
+          checkAbort(signal);
+          // Cache the compressed original, never decoded full-resolution frames.
+          activeSource.file = file;
+          return openVideo(file, signal);
+        })();
+      }
+      const reader = await readerPromise;
+      checkAbort(signal);
+      const frame = await reader.draw(
+        activeSource.times[message.index],
+        message
+      );
+      const bitmap = await createImageBitmap(frame);
+      if (signal.aborted || !isCurrent(message, generation, renderId)) {
+        bitmap.close();
+        return;
+      }
+      worker.postMessage(
+        { type: 'frame', generation, requestId: renderId, bitmap },
+        [bitmap]
+      );
+    } catch (err) {
+      if (!signal.aborted && isCurrent(message, generation, renderId)) {
+        worker.postMessage({
+          type: 'frame',
+          generation,
+          requestId: renderId,
+          error: err.message,
+        });
+      }
+    }
+  }
+  const handleMessage = ({ data: message }) => {
+    const id =
+      message.phase === 'load'
+        ? loadId
+        : message.phase === 'preview'
+          ? previewId
+          : renderId;
+    if (destroyed || !isCurrent(message, generation, id)) {
+      message.bitmap?.close();
+      return;
+    }
+    if (message.type === 'frameNeeded') {
+      provideFrame(message);
+      return;
+    }
+    if (message.type === 'renderFinished') {
+      controller?.abort();
+      controller = null;
+      readerPromise = null;
+      return;
+    }
+    if (message.type === 'image') {
+      try {
+        canvas.width = message.bitmap.width;
+        canvas.height = message.bitmap.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Could not display the preview.');
+        ctx.drawImage(message.bitmap, 0, 0);
+      } finally {
+        message.bitmap.close();
+      }
+      return;
+    }
+    // Refinement is optional; keep the usable cached preview on failure.
+    if (message.phase === 'refine') return;
+    if (message.type === 'exportDone') {
+      const completedGeneration = generation;
+      const completedId = renderId;
+      message.isCurrent = () =>
+        !destroyed &&
+        generation === completedGeneration &&
+        renderId === completedId;
+    }
+    onEvent(message);
+    if (message.type === 'loaded' && latestParams)
+      scheduleRefinement(latestParams);
+  };
+  const handleError = (event) => {
+    stopRender();
+    worker.terminate();
+    generation++;
+    source = null;
+    worker = makeWorker();
+    worker.onmessage = handleMessage;
+    worker.onerror = handleError;
+    onEvent({
+      type: 'error',
+      phase: 'worker',
+      message:
+        event.message || 'Worker failed. Open the source again to retry.',
+    });
+  };
+  worker.onmessage = handleMessage;
+  worker.onerror = handleError;
 
   return {
-    load(files, initialPreview, requestId) {
-      worker.postMessage({ type: 'load', files, initialPreview, requestId });
+    load(files, initialPreview, requestId, descriptor) {
+      stopRender();
+      loadId = requestId;
+      source = descriptor || { kind: 'photos' };
+      latestParams = initialPreview;
+      worker.postMessage({
+        type: 'load',
+        files,
+        initialPreview,
+        requestId,
+        generation,
+        source: {
+          kind: source.kind,
+          width: source.width,
+          height: source.height,
+        },
+      });
     },
     cancelLoad() {
-      worker.postMessage({ type: 'cancelLoad' });
+      stopRender();
+      generation++;
+      source = null;
+      latestParams = null;
+      worker.postMessage({ type: 'reset', generation });
     },
     preview(params) {
-      worker.postMessage({ type: 'preview', ...params });
+      stopRender();
+      latestParams = params;
+      previewId = ++sequence;
+      worker.postMessage({
+        type: 'preview',
+        ...params,
+        generation,
+        requestId: previewId,
+      });
+      scheduleRefinement(params);
     },
     exportImage(params) {
-      worker.postMessage({ type: 'export', ...params });
+      startRender('export', params);
     },
     cancelExport() {
-      worker.postMessage({ type: 'cancelExport' });
+      stopRender();
+      onEvent({ type: 'exportCancelled' });
     },
     destroy() {
+      destroyed = true;
+      stopRender();
       worker.terminate();
     },
   };

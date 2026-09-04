@@ -40,64 +40,51 @@ a plain `readdirSync().sort()`, would disagree.
 
 ## Video input
 
-A single `.mp4`, `.mov`, `.m4v` or `.webm` can be dropped in instead of a folder,
-for material that was already rendered to a clip. The video is stepped frame by
-frame by seeking a hidden `<video>` element, and each sampled frame is encoded to
-a JPEG in memory. From that point on it uses the same preview, range handles and
-export as a folder of stills.
+A single `.mp4`, `.mov`, `.m4v` or `.webm` can be dropped in instead of photos.
+The app retains the original clip and up to 600 evenly spaced sample timestamps.
+Its frame rate is estimated from playback, with a 30 fps fallback; variable-rate
+clips and browser seeking can produce uneven or repeated decoded frames. The UI
+labels this estimate rather than promising frame-exact extraction.
 
-Frames are sampled evenly across the whole clip, up to a cap of 600. A 20 second
-clip at 30fps therefore yields every one of its 600 frames, while a 60 second one
-yields every third. The frame rate is measured from the video rather than assumed,
-and the app reports what it sampled. There is no control for it: below the cap
-every frame is used, and above it the only choice left is which ones to drop.
-
-Two consequences are worth knowing. The frames are re-encoded, so a video source
-goes through JPEG once more than a folder does. This is barely visible on footage
-that is already h.264, but it is not lossless. Extracted frames carry no metadata,
-so the EXIF option does not appear for a video.
-
-Extraction is one seek and one JPEG encode per frame, and the two are pipelined
-across a pair of canvases, so a frame encodes while the next one is being seeked
-to. That is most of the cost, and it roughly halves it.
+Import encodes only reduced preview JPEGs. Full-resolution frames are never
+collected in memory: refinement and export seek the original video sequentially,
+transfer one frame to the worker, composite it, and release it before requesting
+the next. Video exports carry no EXIF. Video processing uses the browser's SDR
+canvas output; this is not an HDR-preserving workflow.
 
 ## The sample clip
 
-`public/example-startrail.mp4` is loaded by the page itself, a moment after first
-paint, and stacked like any other video. It replaces the gallery of finished
-stacks that used to sit here: the interesting part of this tool is what power,
-min opacity and the range handles do, and a still cannot show that. Opening a
-folder or a video at any point aborts the sample and takes over, including during
-the download.
+The page first displays a poster, then loads prepared JPEG previews from
+`public/sample/`. These are generated from every frame of the bundled sample and
+require no video seeking or encoding at startup. Once loaded, the frame range
+sweeps from the first frame to the complete stack. Selecting a source cancels
+sample loading.
 
-Its first frame is saved as a lightweight preview, so the page has a real image
-and disabled controls from the first paint. Download, extraction and frame-cache
-progress appear over that image; later source changes keep the last completed
-stack visible until its replacement is ready. Once the sample is ready, its
-frame range sweeps from the saved first frame to the complete stack.
-
-It is 2.8 seconds at 1080 × 1620, deliberately re-encoded down to 2.5 MB, since
-the download is the slowest part of arriving on the page. Stacked side by side
-with the 6.9 MB original the two differ by 0.6% mean, which is nothing on a night
-sky.
+The original `public/example-startrail.mp4` is fetched only when a refinement or
+export needs it. To regenerate the previews and timestamp manifest, install
+FFmpeg (including ffprobe) and run `pnpm generate:sample`.
 
 ## Everything runs locally
 
-There is no server and no upload. Frames are decoded and composited by a Web
-Worker on your own machine, which is what makes a folder of several hundred
-full-resolution frames practical.
+There is no server processing and no upload. A Web Worker composites the frames.
+The decoded interaction cache is limited to **64 MiB**, separate from the visible
+composite, decoder surfaces, temporary frame and render canvas. Long sequences
+receive smaller proxies without dropping photo frames. Replacing a source
+releases the cache while retaining the last displayed composite.
 
-Two passes do the work. Opening a folder decodes every frame once at a reduced
-size into a cache sized to fit a fixed memory budget. Long sequences get a
-smaller preview, but no frames are sampled out. Every frame must
-have the same aspect ratio. The preview's longest displayed side is at most 640
-CSS pixels, with an exactly 2x backing bitmap for Retina displays, and it is
-capped again at 60% of the viewport height so a portrait sequence cannot push
-the controls off the bottom of the screen. Changing
-power, min opacity or the range then re-stacks in milliseconds. Export makes a
-second pass at full resolution, decoding a couple of frames at a time and
-releasing each one as soon as it is drawn, so peak memory stays at the output
-canvas plus the frames in flight rather than the whole sequence.
+Slider changes use the fast cache immediately. After 300 ms without another
+change, a refinement pass reads every selected source frame at the displayed
+size multiplied by device pixel ratio, capped at source resolution and a longest
+side of 1440 pixels. It swaps in only after completion; newer changes cancel it.
+The displayed size is independent of cache resolution and remains capped by the
+viewport. Resizing the window is reflected on the next refinement.
+
+Export decodes one frame at a time at the requested resolution. Rotation is
+applied directly into the output canvas, avoiding a second full-size rotation
+buffer. Cancellation releases video sessions, temporary canvases, and bitmaps;
+source generations and job IDs prevent stale results from changing the UI or
+starting a download. These limits reduce memory pressure but are not a guarantee
+against browser process termination on every device or input size.
 
 ## EXIF
 
@@ -133,6 +120,23 @@ Then open http://localhost:3009/startrails.
 
 `pnpm build` produces the static export in `out/`, which the Deploy workflow
 publishes to the `gh-pages` branch.
+
+Checks:
+
+```sh
+pnpm test
+pnpm exec playwright install chromium webkit
+pnpm build
+pnpm test:browser
+```
+
+The browser suite serves `out/` under `/startrails`, exercises Chromium and
+WebKit, and compares faint-star refinement with a resized full-resolution export.
+It also covers video import, rotated export, cancellation, source replacement,
+decode errors, and worker teardown. Set `CHROME_CHANNEL=chrome` to use an
+installed Chrome instead of Playwright's Chromium. Testing on the physical
+phone with the original failing clip remains necessary to confirm the reported
+iPhone reload is resolved.
 
 One constraint worth knowing: `src/workers/stack.worker.js` must not import
 anything. Under `output: 'export'` Turbopack copies it into `_next/static/media`
