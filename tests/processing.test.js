@@ -7,6 +7,7 @@ import {
   previewSize,
   sampleTimes,
 } from '../src/lib/processing.js';
+import { planVideo, videoSize } from '../src/lib/videoExport.js';
 
 test('timestamps land halfway inside frames, including clip boundaries', () => {
   const { times, total, step } = sampleTimes(2.8, 30);
@@ -72,4 +73,59 @@ test('stale source generations and stale jobs are rejected independently', () =>
   assert.equal(isCurrent({ generation: 2, requestId: 4 }, 2, 4), true);
   assert.equal(isCurrent({ generation: 1, requestId: 4 }, 2, 4), false);
   assert.equal(isCurrent({ generation: 2, requestId: 3 }, 2, 4), false);
+});
+
+test('a video loop repeats whole times to clear the minimum length', () => {
+  // 84 frames, a 20-frame window: 64 positions, 4.27 s at 15 fps.
+  const plan = planVideo({
+    totalFrames: 84,
+    windowWidth: 19,
+    fps: 15,
+    minSeconds: 5,
+  });
+  assert.equal(plan.cycleFrames, 65);
+  assert.equal(plan.loops, 2);
+  assert.equal(plan.totalOutputFrames, 130);
+  assert.ok(plan.duration >= 5);
+
+  // A loop already past the minimum is left alone.
+  assert.equal(
+    planVideo({ totalFrames: 300, windowWidth: 10, fps: 15, minSeconds: 5 })
+      .loops,
+    1
+  );
+
+  // A single selected frame slides across everything.
+  const whole = planVideo({
+    totalFrames: 84,
+    windowWidth: 0,
+    fps: 30,
+    minSeconds: 1,
+  });
+  assert.equal(whole.cycleFrames, 84);
+  assert.equal(whole.loops, 1);
+
+  for (const fps of [5, 10, 15, 24, 30, 60]) {
+    for (const minSeconds of [1, 5, 30]) {
+      const { duration } = planVideo({
+        totalFrames: 84,
+        windowWidth: 60,
+        fps,
+        minSeconds,
+      });
+      assert.ok(duration >= minSeconds, `${fps} fps, ${minSeconds}s`);
+    }
+  }
+});
+
+test('video dimensions are even, because h.264 requires it', () => {
+  assert.deepEqual(videoSize({ width: 893, height: 1341 }), {
+    width: 894,
+    height: 1342,
+  });
+  assert.deepEqual(videoSize({ width: 1080, height: 1620 }), {
+    width: 1080,
+    height: 1620,
+  });
+  assert.deepEqual(videoSize({ width: 1, height: 1 }), { width: 2, height: 2 });
 });

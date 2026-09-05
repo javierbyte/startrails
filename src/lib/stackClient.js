@@ -19,9 +19,11 @@ export function createStacker({ canvas, onEvent }) {
   let readerPromise;
   let destroyed = false;
   let latestParams;
+  let onSequenceFrame = null;
 
   function stopRender() {
     clearTimeout(timer);
+    onSequenceFrame = null;
     controller?.abort();
     controller = null;
     readerPromise = null;
@@ -30,7 +32,7 @@ export function createStacker({ canvas, onEvent }) {
   }
   function startRender(type, params) {
     stopRender();
-    if (type === 'export') previewId = undefined;
+    if (type !== 'refine') previewId = undefined;
     renderId = ++sequence;
     controller = new AbortController();
     const rect = canvas.getBoundingClientRect();
@@ -98,6 +100,26 @@ export function createStacker({ canvas, onEvent }) {
       }
     }
   }
+  // One window position of a video export: handed to the consumer, then
+  // acknowledged so the worker composites the next one. Exactly one bitmap is
+  // ever in flight, however far the compositing runs ahead of the encoder.
+  async function consumeSequenceFrame(message) {
+    const consume = onSequenceFrame;
+    try {
+      if (consume) await consume(message.bitmap, message.index, message.total);
+    } catch (err) {
+      // A cancel while the consumer was mid-encode tears the encoder down under
+      // it, so the throw that follows is the cancel, not a failure to report.
+      if (onSequenceFrame !== consume) return;
+      stopRender();
+      onEvent({ type: 'error', phase: 'sequence', message: err.message });
+      return;
+    } finally {
+      message.bitmap.close();
+    }
+    if (!destroyed && isCurrent(message, generation, renderId))
+      worker.postMessage({ type: 'sequenceAck', generation, requestId: renderId });
+  }
   const handleMessage = ({ data: message }) => {
     const id =
       message.phase === 'load'
@@ -111,6 +133,10 @@ export function createStacker({ canvas, onEvent }) {
     }
     if (message.type === 'frameNeeded') {
       provideFrame(message);
+      return;
+    }
+    if (message.type === 'sequenceFrame') {
+      consumeSequenceFrame(message);
       return;
     }
     if (message.type === 'renderFinished') {
@@ -133,7 +159,7 @@ export function createStacker({ canvas, onEvent }) {
     }
     // Refinement is optional; keep the usable cached preview on failure.
     if (message.phase === 'refine') return;
-    if (message.type === 'exportDone') {
+    if (message.type === 'exportDone' || message.type === 'sequenceDone') {
       const completedGeneration = generation;
       const completedId = renderId;
       message.isCurrent = () =>
@@ -204,6 +230,14 @@ export function createStacker({ canvas, onEvent }) {
     exportImage(params) {
       startRender('export', params);
     },
+    /**
+     * Composites every position of the sliding window. `onFrame` is awaited
+     * before the next one is asked for, so it can encode at its own pace.
+     */
+    exportSequence(params, onFrame) {
+      startRender('sequence', params);
+      onSequenceFrame = onFrame;
+    },
     cancelExport() {
       stopRender();
       onEvent({ type: 'exportCancelled' });
@@ -216,11 +250,17 @@ export function createStacker({ canvas, onEvent }) {
   };
 }
 
-/** Default output name, echoing the CLI's `[first]-[last]-p[power][-mo[min]].jpg`. */
-export function exportFileName({ firstName, lastName, power, minOpacity }) {
+/** Default output name, echoing the CLI's `[first]-[last]-p[power][-mo[min]]`. */
+export function exportFileName({
+  firstName,
+  lastName,
+  power,
+  minOpacity,
+  extension = 'jpg',
+}) {
   const stem = (name) => name.replace(/\.[^.]+$/, '');
   const mo = minOpacity > 0 ? `-mo${Math.round(minOpacity * 100)}` : '';
-  return `${stem(firstName)}-${stem(lastName)}-p${power}${mo}.jpg`;
+  return `${stem(firstName)}-${stem(lastName)}-p${power}${mo}.${extension}`;
 }
 
 export function downloadBlob(blob, fileName) {

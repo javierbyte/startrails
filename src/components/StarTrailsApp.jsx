@@ -31,6 +31,16 @@ import {
   supportsDirectoryPicker,
 } from '../lib/folder.js';
 import { loadSampleFrames, framesFromVideoFile, isVideo } from '../lib/video.js';
+import {
+  createVideoEncoder,
+  planVideo,
+  videoSize,
+  FPS_OPTIONS,
+  DEFAULT_FPS,
+  DEFAULT_MIN_SECONDS,
+  MIN_MIN_SECONDS,
+  MAX_MIN_SECONDS,
+} from '../lib/videoExport.js';
 
 // The page loads this by itself so the controls have something real under them
 // from the start: a still gallery could only show finished stacks, where the
@@ -117,6 +127,10 @@ function progressLabel(progress) {
       return `Reading frames ${progress.done} / ${progress.total}`;
     case 'export':
       return `Stacking ${progress.done} / ${progress.total}`;
+    case 'sequence':
+      return `Rendering video ${progress.done} / ${progress.total}`;
+    case 'encode':
+      return 'Writing the video file';
     default:
       return '';
   }
@@ -271,6 +285,9 @@ export default function StarTrailsApp() {
   const skipNextPreviewRef = useRef(false);
   const folderInputRef = useRef(null);
   const playbackRef = useRef(null);
+  // A video export owns an encoder for as long as it runs, and every way out of
+  // it -- finished, cancelled, failed -- has to hand it back.
+  const videoJobRef = useRef(null);
 
   const [frames, setFrames] = useState([]);
   const [folder, setFolder] = useState(null);
@@ -299,7 +316,16 @@ export default function StarTrailsApp() {
   const [isPlaying, setIsPlaying] = useState(false);
 
   const [rotation, setRotation] = useState(0);
-  const [scale, setScale] = useState(1);
+  // Scale is held as a key rather than a factor: "Preview size" resolves against
+  // the current source, so a stored number stops matching any tab the moment a
+  // differently sized source is opened. Image and video keep separate picks --
+  // a video above preview size re-decodes every frame for every output frame,
+  // so it is not somewhere to arrive by accident.
+  const [imageScaleKey, setImageScaleKey] = useState('full');
+  const [videoScaleKey, setVideoScaleKey] = useState('preview');
+  const [exportKind, setExportKind] = useState('image');
+  const [fps, setFps] = useState(DEFAULT_FPS);
+  const [minSeconds, setMinSeconds] = useState(DEFAULT_MIN_SECONDS);
   const [copyExif, setCopyExif] = useState(true);
 
   const [status, setStatus] = useState('extracting');
@@ -327,6 +353,14 @@ export default function StarTrailsApp() {
       playbackRef.current = null;
     }
     setIsPlaying(false);
+  }, []);
+
+  // The one place an encoder is let go of, so no path out of a video export can
+  // leave one holding its buffers.
+  const discardVideoJob = useCallback(() => {
+    const job = videoJobRef.current;
+    videoJobRef.current = null;
+    job?.encoder.close();
   }, []);
 
   // --- worker plumbing ---------------------------------------------------
@@ -371,6 +405,7 @@ export default function StarTrailsApp() {
       setStatus('ready');
       setProgress(null);
       setResult({
+        kind: 'image',
         width: message.width,
         height: message.height,
         frames: message.frames,
@@ -387,6 +422,49 @@ export default function StarTrailsApp() {
       );
     },
     [copyExif, first, frames, last, minOpacity, power, source]
+  );
+
+  const finishVideoExport = useCallback(
+    async (message) => {
+      const job = videoJobRef.current;
+      if (!job) return;
+      videoJobRef.current = null;
+      // Every frame is in; the bar stays full while the file is written.
+      setProgress({ phase: 'encode', done: 1, total: 1 });
+
+      try {
+        const blob = await job.encoder.finish(job.plan.loops);
+        if (!message.isCurrent()) return;
+        setStatus('ready');
+        setProgress(null);
+        setResult({
+          kind: 'video',
+          width: job.size.width,
+          height: job.size.height,
+          frames: job.plan.totalOutputFrames,
+          duration: job.plan.duration,
+          fps,
+        });
+        downloadBlob(
+          blob,
+          exportFileName({
+            firstName: frames[0].name,
+            lastName: frames[frames.length - 1].name,
+            power,
+            minOpacity: minOpacity / 100,
+            extension: job.encoder.extension,
+          })
+        );
+      } catch (err) {
+        if (!message.isCurrent()) return;
+        setError(err.message);
+        setStatus('ready');
+        setProgress(null);
+      } finally {
+        job.encoder.close();
+      }
+    },
+    [fps, frames, minOpacity, power]
   );
 
   eventRef.current = (message) => {
@@ -446,6 +524,10 @@ export default function StarTrailsApp() {
         finishExport(message);
         break;
 
+      case 'sequenceDone':
+        finishVideoExport(message);
+        break;
+
       case 'exportCancelled':
         setStatus('ready');
         setProgress(null);
@@ -459,6 +541,7 @@ export default function StarTrailsApp() {
           break;
         }
         previewRef.current = { busy: false, queued: null, sent: null };
+        discardVideoJob();
         setError(message.message);
         // A failed load has no complete preview cache to restack. Export errors
         // can return to the already-loaded preview, but aspect-ratio/decode
@@ -542,6 +625,8 @@ export default function StarTrailsApp() {
 
   useEffect(() => () => {
     if (playbackRef.current !== null) clearInterval(playbackRef.current);
+    videoJobRef.current?.encoder.close();
+    videoJobRef.current = null;
   }, []);
 
   // Loading a different source or starting an export invalidates the current
@@ -821,6 +906,43 @@ export default function StarTrailsApp() {
     if (folderInputRef.current) folderInputRef.current.click();
   }, [canPickDirectory, openWithPicker]);
 
+  const hasFrames = frames.length > 0;
+  const totalFrames = hasFrames ? frames.length : SAMPLE.frames;
+  const selected = last - first + 1;
+
+  const turned = rotation === 90 || rotation === 270;
+  const hasDimensions = natural.width > 0 && natural.height > 0;
+  const previewScale = natural.width ? preview.width / natural.width : 1;
+  const scaleOptions = [
+    { key: 'full', label: 'Full size', factor: 1 },
+    { key: 'half', label: 'Half', factor: 0.5 },
+    {
+      key: 'preview',
+      label: 'Preview size',
+      factor: hasDimensions ? previewScale : null,
+    },
+  ];
+  const wantsVideo = exportKind === 'video';
+  const scaleKey = wantsVideo ? videoScaleKey : imageScaleKey;
+  const setScaleKey = wantsVideo ? setVideoScaleKey : setImageScaleKey;
+  const scale = scaleOptions.find((option) => option.key === scaleKey).factor ?? 1;
+  const outWidth = hasDimensions
+    ? Math.max(1, Math.round((turned ? natural.height : natural.width) * scale))
+    : null;
+  const outHeight = hasDimensions
+    ? Math.max(1, Math.round((turned ? natural.width : natural.height) * scale))
+    : null;
+  // The window slides from frame 0 to the last position that still fits, one
+  // position per video frame -- the same sweep the play button previews.
+  const windowWidth = last - first;
+  const allSelected = selected >= totalFrames;
+  const videoPlan = planVideo({ totalFrames, windowWidth, fps, minSeconds });
+  const videoOut = hasDimensions
+    ? videoSize({ width: outWidth, height: outHeight })
+    : null;
+  const videoDecodes =
+    scale > previewScale ? videoPlan.cycleFrames * (windowWidth + 1) : 0;
+
   // --- export ------------------------------------------------------------
 
   const startExport = useCallback(() => {
@@ -840,9 +962,65 @@ export default function StarTrailsApp() {
     });
   }, [first, last, minOpacity, power, rotation, scale, stopPlayback]);
 
-  const hasFrames = frames.length > 0;
-  const totalFrames = hasFrames ? frames.length : SAMPLE.frames;
-  const selected = last - first + 1;
+  // Only the loop is composited. Repeating it to reach the minimum length is the
+  // muxer's job, so a longer video is not a longer render.
+  const startVideoExport = useCallback(async () => {
+    stopPlayback();
+    setError(null);
+    setResult(null);
+
+    const plan = planVideo({ totalFrames, windowWidth, fps, minSeconds });
+    const size = videoSize({ width: outWidth, height: outHeight });
+
+    let encoder;
+    try {
+      // Probing the codecs can fail outright, and it is much friendlier to say
+      // so before the progress bar appears than half way through.
+      encoder = await createVideoEncoder({ ...size, fps });
+    } catch (err) {
+      setError(err.message);
+      return;
+    }
+
+    // After the await, not before: two clicks landing during the codec probe
+    // would otherwise both build an encoder and only one would be handed back.
+    discardVideoJob();
+    videoJobRef.current = { plan, size, encoder };
+    previewRef.current = { busy: false, queued: null, sent: null };
+    setStatus('exporting');
+    setProgress({ phase: 'sequence', done: 0, total: plan.cycleFrames });
+    stackerRef.current.exportSequence(
+      {
+        power,
+        minOpacity: minOpacity / 100,
+        windowWidth,
+        scale,
+        rotation,
+      },
+      async (bitmap, index, total) => {
+        await encoder.add(bitmap, index);
+        setProgress({ phase: 'sequence', done: index + 1, total });
+      }
+    );
+  }, [
+    fps,
+    minOpacity,
+    minSeconds,
+    outHeight,
+    outWidth,
+    power,
+    rotation,
+    scale,
+    stopPlayback,
+    totalFrames,
+    windowWidth,
+    discardVideoJob,
+  ]);
+
+  const cancelExport = useCallback(() => {
+    discardVideoJob();
+    stackerRef.current.cancelExport();
+  }, [discardVideoJob]);
 
   const togglePlayback = useCallback(() => {
     if (playbackRef.current !== null) {
@@ -890,15 +1068,6 @@ export default function StarTrailsApp() {
     },
     [stopPlayback]
   );
-  const turned = rotation === 90 || rotation === 270;
-  const hasDimensions = natural.width > 0 && natural.height > 0;
-  const outWidth = hasDimensions
-    ? Math.max(1, Math.round((turned ? natural.height : natural.width) * scale))
-    : null;
-  const outHeight = hasDimensions
-    ? Math.max(1, Math.round((turned ? natural.width : natural.height) * scale))
-    : null;
-  const previewScale = natural.width ? preview.width / natural.width : 1;
   const progressPercent = progress
     ? Math.max(
         0,
@@ -911,12 +1080,6 @@ export default function StarTrailsApp() {
         )
       )
     : 0;
-
-  const scaleOptions = [
-    { label: 'Full size', value: 1 },
-    { label: 'Half', value: 0.5 },
-    { label: 'Preview size', value: hasDimensions ? previewScale : null },
-  ];
 
   return (
     <div className="app">
@@ -1126,13 +1289,32 @@ export default function StarTrailsApp() {
           aria-disabled={controlsDisabled || undefined}
         >
           <Tabs>
+            <Tab
+              active={!wantsVideo}
+              aria-disabled={controlsDisabled}
+              onClick={() => !controlsDisabled && setExportKind('image')}
+            >
+              Image
+            </Tab>
+            <Tab
+              active={wantsVideo}
+              aria-disabled={controlsDisabled}
+              onClick={() => !controlsDisabled && setExportKind('video')}
+            >
+              Video
+            </Tab>
+          </Tabs>
+
+          <Space h={0.5} />
+          <Tabs>
             {scaleOptions.map((option) => (
               <Tab
-                key={option.label}
-                active={option.value !== null && scale === option.value}
-                aria-disabled={controlsDisabled || option.value === null}
+                key={option.key}
+                active={scaleKey === option.key}
+                aria-disabled={controlsDisabled || option.factor === null}
                 onClick={() => {
-                  if (!controlsDisabled && option.value !== null) setScale(option.value);
+                  if (!controlsDisabled && option.factor !== null)
+                    setScaleKey(option.key);
                 }}
               >
                 {option.label}
@@ -1140,39 +1322,114 @@ export default function StarTrailsApp() {
             ))}
           </Tabs>
           <Space h={0.5} />
-          <SmallText>
-            {outWidth} × {outHeight} JPEG, quality 95.
-            {hasDimensions && scale === 1
-              ? ' Full size is slower because every frame is decoded again.'
-              : ''}
-          </SmallText>
 
-          {/* Frames extracted from a video are canvas JPEGs with no metadata
-              of their own, so there is nothing to offer. */}
-          {hasFrames && source !== 'video' && (
+          {wantsVideo ? (
             <>
+              <SmallText>
+                {videoOut ? `${videoOut.width} × ${videoOut.height} ` : ''}MP4 at{' '}
+                {fps} fps. The {videoPlan.cycleFrames}-frame loop repeats{' '}
+                {videoPlan.loops}× for {videoPlan.duration.toFixed(1)} s.
+                {videoDecodes
+                  ? ` Above preview size every one of those frames decodes its ${selected} source frames again — ${videoDecodes} decodes in all.`
+                  : ''}
+              </SmallText>
+
               <Space h={1} />
-              <Checkbox
-                label="Preserve EXIF from the first frame"
-                checked={copyExif}
-                onChange={setCopyExif}
+              <Text>
+                Minimum length <strong>{minSeconds}s</strong>
+              </Text>
+              <Space h={0.25} />
+              <Range
+                aria-label="Minimum video length in seconds"
+                aria-valuetext={`${minSeconds} seconds`}
+                min={MIN_MIN_SECONDS}
+                max={MAX_MIN_SECONDS}
+                step={1}
+                value={minSeconds}
+                disabled={controlsDisabled}
+                onChange={(event) => setMinSeconds(Number(event.target.value))}
               />
               <Space h={0.25} />
               <SmallText>
-                Keeps the camera, lens, date and shooting settings from the first
-                frame.
+                The loop repeats whole times, so the video only ever runs past
+                this, never short of it.
               </SmallText>
+
+              <Space h={1} />
+              <Text>
+                Frame rate <strong>{fps} fps</strong>
+              </Text>
+              <Space h={0.25} />
+              <Tabs>
+                {FPS_OPTIONS.map((option) => (
+                  <Tab
+                    key={option}
+                    active={fps === option}
+                    aria-disabled={controlsDisabled}
+                    onClick={() => !controlsDisabled && setFps(option)}
+                  >
+                    {option}
+                  </Tab>
+                ))}
+              </Tabs>
+            </>
+          ) : (
+            <>
+              <SmallText>
+                {outWidth} × {outHeight} JPEG, quality 95.
+                {hasDimensions && scale === 1
+                  ? ' Full size is slower because every frame is decoded again.'
+                  : ''}
+              </SmallText>
+
+              {/* Frames extracted from a video are canvas JPEGs with no metadata
+                  of their own, so there is nothing to offer. */}
+              {hasFrames && source !== 'video' && (
+                <>
+                  <Space h={1} />
+                  <Checkbox
+                    label="Preserve EXIF from the first frame"
+                    checked={copyExif}
+                    onChange={setCopyExif}
+                  />
+                  <Space h={0.25} />
+                  <SmallText>
+                    Keeps the camera, lens, date and shooting settings from the
+                    first frame.
+                  </SmallText>
+                </>
+              )}
             </>
           )}
         </div>
 
+        {/* Outside the control group so it stays readable while the controls
+            are inert. A full selection leaves the window nowhere to slide. */}
+        {wantsVideo && allSelected && (
+          <>
+            <Space h={1} />
+            <Text style={{ color: 'var(--accent-color)' }}>
+              Video export requires selecting less frames
+            </Text>
+          </>
+        )}
+
         <Space h={1} />
         <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
-          <Button onClick={startExport} disabled={controlsDisabled}>
-            {status === 'exporting' ? 'Stacking…' : 'Export JPEG'}
+          <Button
+            onClick={wantsVideo ? startVideoExport : startExport}
+            disabled={controlsDisabled || (wantsVideo && allSelected)}
+          >
+            {status === 'exporting'
+              ? wantsVideo
+                ? 'Rendering…'
+                : 'Stacking…'
+              : wantsVideo
+                ? 'Export video'
+                : 'Export JPEG'}
           </Button>
           {status === 'exporting' && (
-            <Button onClick={() => stackerRef.current.cancelExport()}>Cancel</Button>
+            <Button onClick={cancelExport}>Cancel</Button>
           )}
         </Inline>
 
@@ -1180,8 +1437,19 @@ export default function StarTrailsApp() {
           <>
             <Space h={1} />
             <Text>
-              Saved {result.width} × {result.height} from {result.frames} frames
-              {result.exifApplied ? ', preserving the first frame EXIF' : ''}.
+              {result.kind === 'video' ? (
+                <>
+                  Saved a {result.duration.toFixed(1)} s {result.width} ×{' '}
+                  {result.height} video, {result.frames} frames at {result.fps}{' '}
+                  fps.
+                </>
+              ) : (
+                <>
+                  Saved {result.width} × {result.height} from {result.frames}{' '}
+                  frames
+                  {result.exifApplied ? ', preserving the first frame EXIF' : ''}.
+                </>
+              )}
             </Text>
           </>
         )}
