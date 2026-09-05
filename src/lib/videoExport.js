@@ -1,14 +1,6 @@
-// Encodes the sliding frame window into a looping mp4.
-//
-// Mediabunny is used purely as a muxer. Its own encoder wrapper waits on the
-// WebCodecs `dequeue` event once a few frames are in flight, and browsers that
-// never fire it leave the export stuck forever -- driving VideoEncoder directly
-// and draining it with `flush` after every frame avoids that event entirely,
-// and keeps Safari from wedging on a queue of raw frames.
-//
-// Only one cycle is ever composited and encoded. Its packets are then written
-// out `loops` times with shifted timestamps, so a longer video costs a few more
-// kilobytes rather than another pass over the frames.
+// Encode one window sweep with WebCodecs and mux it with Mediabunny.
+// Flush after each frame to avoid stalls from missing dequeue events.
+// Repeat encoded packets with shifted timestamps to extend playback.
 
 export const FPS_OPTIONS = [5, 10, 15, 24, 30, 60];
 export const DEFAULT_FPS = 15;
@@ -16,14 +8,12 @@ export const DEFAULT_MIN_SECONDS = 5;
 export const MIN_MIN_SECONDS = 1;
 export const MAX_MIN_SECONDS = 30;
 
-// Nothing in the encode path may wait forever: a stuck encoder has to surface
-// as an error rather than a progress bar that never moves.
+// Fail stalled encoder operations after this timeout.
 const ENCODER_STALL_SECONDS = 15;
-// Frame 0 is drained on its own, so an encoder that will never drain is caught
-// in a second rather than after the whole clip has been fed in.
+// Use a shorter timeout for the first frame to detect unsupported encoding early.
 const ENCODER_PROBE_SECONDS = 6;
 
-// Tried in order; the first one the browser accepts at the export size wins.
+// Try codecs in order at the requested export size.
 const CODEC_CANDIDATES = [
   ['avc', 'avc1.640028'],
   ['avc', 'avc1.4d0028'],
@@ -31,13 +21,22 @@ const CODEC_CANDIDATES = [
   ['vp9', 'vp09.00.10.08'],
 ];
 
-/**
- * How long the loop is and how often it repeats. The window slides from frame 0
- * to the last position that still fits, which is the same sweep the play button
- * previews, so a cycle is one position per frame.
- */
-export function planVideo({ totalFrames, windowWidth, fps, minSeconds }) {
-  const cycleFrames = Math.max(1, totalFrames - windowWidth);
+/** Calculate cycle length and repetitions for a sliding-window export.
+ * maxFrames limits output by sampling the sweep. Anchor the stride on
+ * stillPosition so the paired still matches an encoded frame. */
+export function planVideo({
+  totalFrames,
+  windowWidth,
+  fps,
+  minSeconds,
+  maxFrames = Infinity,
+  stillPosition = 0,
+}) {
+  const positions = Math.max(1, totalFrames - windowWidth);
+  const still = Math.min(Math.max(0, stillPosition), positions - 1);
+  const stride = Math.max(1, Math.ceil(positions / Math.max(1, maxFrames)));
+  const startPosition = still % stride;
+  const cycleFrames = Math.floor((positions - 1 - startPosition) / stride) + 1;
   const cycleDuration = cycleFrames / fps;
   const loops = Math.max(1, Math.ceil(minSeconds / cycleDuration));
 
@@ -45,12 +44,24 @@ export function planVideo({ totalFrames, windowWidth, fps, minSeconds }) {
     cycleFrames,
     cycleDuration,
     loops,
+    stride,
+    startPosition,
+    stillFrame: (still - startPosition) / stride,
+    sampled: stride > 1,
+    positions,
     totalOutputFrames: cycleFrames * loops,
     duration: cycleDuration * loops,
   };
 }
 
-/** h.264 needs even dimensions, and it costs nothing to keep vp9 on the same grid. */
+/** Resolution uses the shorter side, independently of rotation, capped at 4K. */
+export function videoResolutions({ width, height }) {
+  const limit = Math.min(width, height, 2160);
+  if (!(limit > 0)) return [];
+  return [...[360, 480, 720, 1080, 2160].filter((size) => size < limit), limit];
+}
+
+/** Use even dimensions for H.264 and VP9. */
 export function videoSize({ width, height }) {
   return {
     width: Math.max(2, Math.round(width / 2) * 2),
@@ -59,7 +70,7 @@ export function videoSize({ width, height }) {
 }
 
 function videoBitrate(width, height, fps) {
-  // ~0.4 bits per pixel per frame, which is generous for this kind of motion.
+  // Target 0.4 bits per pixel per frame.
   return Math.round(width * height * fps * 0.4);
 }
 
@@ -73,9 +84,19 @@ function withTimeout(promise, message, seconds = ENCODER_STALL_SECONDS) {
   ]);
 }
 
-async function pickCodec(width, height, fps) {
+async function pickCodec(width, height, fps, livePhoto = false) {
   const bitrate = videoBitrate(width, height, fps);
-  for (const [codec, codecString] of CODEC_CANDIDATES) {
+  // Prefer HEVC (hvc1) for Live Photos, with H.264 as a fallback.
+  const candidates = livePhoto
+    ? [
+        ['hevc', 'hvc1.1.6.L153.B0'], ['hevc', 'hvc1.1.6.L150.B0'],
+        ['hevc', 'hvc1.1.6.L123.B0'], ['hevc', 'hvc1.1.6.L120.B0'],
+        ['hevc', 'hvc1.1.6.L93.B0'],
+        ['avc', 'avc1.640034'], ['avc', 'avc1.640033'], ['avc', 'avc1.64002a'],
+        ['avc', 'avc1.640028'], ['avc', 'avc1.4d0028'],
+      ]
+    : CODEC_CANDIDATES;
+  for (const [codec, codecString] of candidates) {
     const config = {
       codec: codecString,
       width,
@@ -98,19 +119,22 @@ async function pickCodec(width, height, fps) {
  * Takes one composited window position at a time and returns the finished file.
  * `width` and `height` must already be even; see videoSize.
  */
-export async function createVideoEncoder({ width, height, fps }) {
+export async function createVideoEncoder({ width, height, fps, livePhoto = false }) {
   if (typeof VideoEncoder === 'undefined') {
     throw new Error(
       'This browser cannot encode video. Try a recent Chrome, Edge, Safari or Firefox.'
     );
   }
 
-  const picked = await pickCodec(width, height, fps);
-  if (!picked) throw new Error('No video encoder setting this browser accepts.');
+  const picked = await pickCodec(width, height, fps, livePhoto);
+  if (!picked) throw new Error(livePhoto
+    ? 'This browser cannot encode the HEVC or high-quality H.264 video required for Live Photos. Try Safari or Chrome on Mac.'
+    : 'No video encoder setting this browser accepts.');
 
   const {
     Output,
     Mp4OutputFormat,
+    MovOutputFormat,
     WebMOutputFormat,
     BufferTarget,
     EncodedVideoPacketSource,
@@ -119,7 +143,9 @@ export async function createVideoEncoder({ width, height, fps }) {
 
   const isMp4 = picked.codec === 'avc';
   const output = new Output({
-    format: isMp4
+    format: livePhoto
+      ? new MovOutputFormat({ fastStart: false })
+      : isMp4
       ? new Mp4OutputFormat({ fastStart: 'in-memory' })
       : new WebMOutputFormat(),
     target: new BufferTarget(),
@@ -146,7 +172,7 @@ export async function createVideoEncoder({ width, height, fps }) {
   encoder.configure(picked.config);
 
   return {
-    extension: isMp4 ? 'mp4' : 'webm',
+    extension: livePhoto ? 'mov' : isMp4 ? 'mp4' : 'webm',
 
     async add(bitmap, index) {
       if (failure) throw new Error(failure.message);
@@ -177,8 +203,7 @@ export async function createVideoEncoder({ width, height, fps }) {
       if (failure) throw new Error(failure.message);
       if (!packets.length) throw new Error('The encoder produced no frames.');
 
-      // Taken from the packets that actually came out rather than the plan, so
-      // each repeat starts exactly where the previous one ended.
+      // Calculate repeat timestamps from the encoded packet count.
       const cycleSpan = packets.length / fps;
       for (let loop = 0; loop < loops; loop++) {
         for (let i = 0; i < packets.length; i++) {
@@ -201,7 +226,7 @@ export async function createVideoEncoder({ width, height, fps }) {
         'Writing the video file stopped responding.'
       );
       return new Blob([output.target.buffer], {
-        type: isMp4 ? 'video/mp4' : 'video/webm',
+        type: livePhoto ? 'video/quicktime' : isMp4 ? 'video/mp4' : 'video/webm',
       });
     },
 

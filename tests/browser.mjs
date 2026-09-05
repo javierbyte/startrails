@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { chromium, webkit } from 'playwright';
 
 // Exercise real browser decoders/canvases and the production static export.
@@ -146,11 +146,8 @@ try {
           (960 * 640 * 3);
         const fastError = error(fast),
           refinedError = error(refined);
-        // Linear falloff steps down by a fixed 1/trail per frame, so only the
-        // newest four frames reach the stack. Row 20 carries exactly one star
-        // per frame -- j=0, marching one pixel right each time -- so frames 36
-        // to 39 land at 25/50/75/100% on columns 56 to 59 and every earlier
-        // column stays at the #030507 background.
+        // With trail=4, frames 36–39 contribute 25/50/75/100% at columns 56–59
+        // on row 20. Earlier columns retain the #030507 background.
         events.length = 0;
         stacker.exportImage({ ...params, fade: 'linear', trail: 4, scale: 1 });
         await until(() => events.some((e) => e.type === 'exportDone'));
@@ -163,8 +160,7 @@ try {
         linearCtx.drawImage(linearBitmap, 0, 0);
         linearBitmap.close();
         const row = linearCtx.getImageData(0, 20, 1200, 1).data;
-        // R+G+B rather than one channel: JPEG subsamples chroma but keeps luma
-        // per pixel, so the sum survives where a single channel can drift.
+        // Compare R+G+B to reduce variation from JPEG chroma subsampling.
         const lum = (x) => row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2];
         const linearTail = [lum(56), lum(57), lum(58), lum(59)];
         const linearDropped = Math.max(
@@ -304,6 +300,64 @@ try {
       const download = await downloadPromise;
       assert.ok(download.suggestedFilename().endsWith('.jpg'));
       assert.equal(await download.failure(), null);
+      // Exercise the complete Live Photo flow, including the full-size still,
+      // MOV encoder, pairing metadata, the loose file pair and cancellation.
+      const png = await page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128; canvas.height = 192;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#234567'; ctx.fillRect(0, 0, 128, 192);
+        return canvas.toDataURL().split(',')[1];
+      });
+      // Use over 90 positions to exercise duration-cap sampling.
+      const photos = Array.from({ length: 120 }, (_, i) => ({
+        name: `frame-${String(i).padStart(3, '0')}.png`,
+        mimeType: 'image/png', buffer: Buffer.from(png, 'base64'),
+      }));
+      await page.locator('input[type=file]').first().setInputFiles(photos);
+      await page.getByText('Live Photo', { exact: true }).click();
+      const liveButton = page.getByRole('button', { name: 'Export Live Photo', exact: true });
+      await page.getByLabel('Last frame', { exact: true }).press('Home');
+      await page.getByLabel('Selected frame range', { exact: true }).press('ArrowRight');
+      await liveButton.click();
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+      const downloadsAfterCancel = downloads.length;
+      await page.waitForTimeout(250);
+      assert.equal(downloads.length, downloadsAfterCancel);
+      // Collect both staggered downloads through the shared listener.
+      const beforeLive = downloads.length;
+      await liveButton.click();
+      const liveDeadline = Date.now() + 60000;
+      while (downloads.length < beforeLive + 2 && Date.now() < liveDeadline)
+        await page.waitForTimeout(100);
+      const [photoDownload, movieDownload] = downloads.slice(beforeLive);
+      assert.equal(downloads.length, beforeLive + 2);
+      const photoName = photoDownload.suggestedFilename();
+      const movieName = movieDownload.suggestedFilename();
+      assert.ok(photoName.endsWith('-live.jpg'), photoName);
+      // Verify the pair shares a filename stem.
+      assert.equal(movieName, photoName.replace(/\.jpg$/, '.mov'));
+      assert.equal(await photoDownload.failure(), null);
+      assert.equal(await movieDownload.failure(), null);
+      const photoBytes = await readFile(await photoDownload.path());
+      const movieBytes = await readFile(await movieDownload.path());
+      assert.equal(photoBytes.readUInt16BE(0), 0xffd8);
+      assert.ok(photoBytes.includes(Buffer.from('Apple iOS')));
+      assert.ok(movieBytes.includes(Buffer.from('com.apple.quicktime.still-image-time')));
+      assert.ok(movieBytes.includes(Buffer.from('com.apple.quicktime.content.identifier')));
+      const saved = page.getByText(/Saved a Live Photo: 128 × 192 photo/);
+      await saved.waitFor();
+      // Verify the sampled sweep fits the duration cap.
+      const seconds = Number(/and ([\d.]+) s of/.exec(await saved.textContent())[1]);
+      assert.ok(seconds > 0 && seconds <= 3, `Live Photo ran ${seconds}s`);
+      await page.getByRole('button', { name: 'Save photo again', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Save video again', exact: true }).waitFor();
+      if (process.env.LIVE_PHOTO_ARTIFACTS) {
+        await mkdir(process.env.LIVE_PHOTO_ARTIFACTS, { recursive: true });
+        await photoDownload.saveAs(`${process.env.LIVE_PHOTO_ARTIFACTS}/${name}.jpg`);
+        await movieDownload.saveAs(`${process.env.LIVE_PHOTO_ARTIFACTS}/${name}.mov`);
+      }
+      console.log(`${name} Live Photo export and cancellation passed`);
       assert.deepEqual(errors, []);
       console.log(
         `${name} production demo, video import, source replacement and export passed`

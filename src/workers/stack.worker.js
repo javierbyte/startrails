@@ -61,8 +61,7 @@ function setup(canvas, width, height, rotation) {
   ctx.globalCompositeOperation = 'lighten';
   return ctx;
 }
-// Curve stretches the falloff across the window; linear gives it a fixed step
-// per frame, so the trail stays the same length however much is selected.
+// Curve spans the window; linear decreases opacity by 1/trail per frame.
 function ramp(index, count, params) {
   if (params.fade === 'linear') {
     const age = count - 1 - index; // 0 is the newest frame in the window
@@ -76,8 +75,7 @@ function draw(ctx, bitmap, index, count, params, width, height) {
     params.minOpacity + (1 - params.minOpacity) * ramp(index, count, params);
   ctx.drawImage(bitmap, 0, 0, width, height);
 }
-// Past the trail a linear ramp reaches zero, so those frames are not worth
-// drawing -- or, at export size, decoding. A floor keeps them all in the stack.
+// Skip zero-opacity frames in linear mode. A positive floor includes all frames.
 function firstVisible(count, params) {
   if (params.fade !== 'linear' || params.minOpacity > 0) return 0;
   return Math.max(0, count - params.trail);
@@ -167,8 +165,7 @@ async function load(message) {
     if (decoded !== bitmaps) decoded.forEach((bitmap) => bitmap.close());
   }
 }
-// One source frame at output resolution: decoded here for stills, seeked on the
-// main thread for videos because only it holds the decoder.
+// Decode photos here; request video frames from the main-thread decoder.
 function acquireFrame(index, width, height, job) {
   return source.kind === 'video'
     ? requestFrame(index, width, height, job)
@@ -232,7 +229,7 @@ async function render(message) {
     else {
       const blob = await canvas.convertToBlob({
         type: 'image/jpeg',
-        quality: 0.95,
+        quality: message.quality ?? 0.95,
       });
       if (!current()) throw cancelled();
       emit({ type: 'exportDone', blob, ...view, frames: drawn }, info);
@@ -252,13 +249,8 @@ async function render(message) {
     emit({ type: 'renderFinished' }, info);
   }
 }
-// Every position of the sliding window, one at a time. Nothing carries over
-// between positions -- the alpha ramp is measured against the window, so a
-// window that has moved is a different stack of different frames.
-//
-// The main thread encodes each position as it arrives and acknowledges it, which
-// is what keeps exactly one bitmap in flight no matter how far ahead of the
-// encoder the compositing runs.
+// Recompute each window position because its opacity ramp changes.
+// Wait for the encoder acknowledgment before sending another bitmap.
 function waitForAck(job) {
   return new Promise((resolve, reject) => {
     seqAck = { resolve, reject, job };
@@ -280,14 +272,18 @@ async function renderSequence(message) {
     const width = Math.max(1, Math.round(natural.width * message.scale));
     const height = Math.max(1, Math.round(natural.height * message.scale));
     const view = outputSize(width, height, message.rotation);
-    // At or below the cached proxy size there is nothing a decode would add, and
-    // the cache turns each position into a handful of drawImage calls.
+    // Reuse cached proxies when output resolution does not exceed proxy size.
     const cached = bitmaps.length === files.length && width <= preview.width;
     const count = message.windowWidth + 1;
-    const total = files.length - message.windowWidth;
+    const positions = files.length - message.windowWidth;
     const start = firstVisible(count, message);
+    // Use planVideo sampling for capped exports; defaults include every position.
+    const stride = Math.max(1, Math.round(message.stride) || 1);
+    const begin = Math.min(Math.max(0, Math.round(message.startPosition) || 0), stride - 1);
+    const total = Math.floor((positions - 1 - begin) / stride) + 1;
+    let output = 0;
 
-    for (let position = 0; position < total; position++) {
+    for (let position = begin; position < positions; position += stride) {
       if (!current()) throw cancelled();
       canvas = new OffscreenCanvas(view.width, view.height);
       const ctx = setup(canvas, width, height, message.rotation);
@@ -309,9 +305,10 @@ async function renderSequence(message) {
       canvas.width = canvas.height = 0;
       canvas = null;
       self.postMessage(
-        { type: 'sequenceFrame', ...info, bitmap, index: position, total },
+        { type: 'sequenceFrame', ...info, bitmap, index: output, total },
         [bitmap]
       );
+      output++;
       await waitForAck(job);
     }
 

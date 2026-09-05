@@ -7,7 +7,7 @@ import {
   previewSize,
   sampleTimes,
 } from '../src/lib/processing.js';
-import { planVideo, videoSize } from '../src/lib/videoExport.js';
+import { planVideo, videoSize, videoResolutions } from '../src/lib/videoExport.js';
 
 test('timestamps land halfway inside frames, including clip boundaries', () => {
   const { times, total, step } = sampleTimes(2.8, 30);
@@ -88,14 +88,14 @@ test('a video loop repeats whole times to clear the minimum length', () => {
   assert.equal(plan.totalOutputFrames, 130);
   assert.ok(plan.duration >= 5);
 
-  // A loop already past the minimum is left alone.
+  // Do not repeat a loop that already meets the minimum duration.
   assert.equal(
     planVideo({ totalFrames: 300, windowWidth: 10, fps: 15, minSeconds: 5 })
       .loops,
     1
   );
 
-  // A single selected frame slides across everything.
+  // A one-frame window visits every source frame.
   const whole = planVideo({
     totalFrames: 84,
     windowWidth: 0,
@@ -128,4 +128,62 @@ test('video dimensions are even, because h.264 requires it', () => {
     height: 1620,
   });
   assert.deepEqual(videoSize({ width: 1, height: 1 }), { width: 2, height: 2 });
+});
+
+
+test('a capped clip samples the whole sweep and keeps the still on a frame', () => {
+  // Sample every fifth position to fit 450 positions into 90 frames.
+  const plan = planVideo({
+    totalFrames: 460, windowWidth: 10, fps: 30, minSeconds: 0,
+    maxFrames: 90, stillPosition: 137,
+  });
+  assert.equal(plan.positions, 450);
+  assert.equal(plan.stride, 5);
+  assert.equal(plan.cycleFrames, 90);
+  assert.equal(plan.stillFrame, 27);
+  assert.ok(plan.sampled);
+  // The still must match a sampled output frame.
+  assert.equal(plan.startPosition + plan.stillFrame * plan.stride, 137);
+
+  // Uncapped exports include every position, starting at zero.
+  const full = planVideo({ totalFrames: 460, windowWidth: 10, fps: 30, minSeconds: 0 });
+  assert.equal(full.stride, 1);
+  assert.equal(full.startPosition, 0);
+  assert.equal(full.cycleFrames, 450);
+
+  for (let positions = 1; positions <= 400; positions += 7) {
+    for (const still of [0, 1, (positions >> 1), positions - 1]) {
+      const capped = planVideo({
+        totalFrames: positions + 10, windowWidth: 10, fps: 30, minSeconds: 0,
+        maxFrames: 90, stillPosition: still,
+      });
+      const label = `${positions} positions, still ${still}`;
+      // Clamp still positions to the last valid window position.
+      const expected = Math.min(still, positions - 1);
+      assert.ok(capped.cycleFrames <= 90, label);
+      assert.ok(capped.cycleFrames >= 1, label);
+      assert.ok(Number.isInteger(capped.stillFrame), label);
+      assert.ok(capped.stillFrame < capped.cycleFrames, label);
+      assert.equal(capped.startPosition + capped.stillFrame * capped.stride, expected, label);
+      // The last sampled position must still be inside the sweep.
+      assert.ok(
+        capped.startPosition + (capped.cycleFrames - 1) * capped.stride < positions,
+        label
+      );
+    }
+  }
+});
+
+test('video resolutions stop at the source or 4K in either orientation', () => {
+  for (const [width, height, expected] of [
+    [1800, 1050, [360, 480, 720, 1050]],
+    [1920, 1080, [360, 480, 720, 1080]],
+    [3840, 2160, [360, 480, 720, 1080, 2160]],
+    [7680, 4320, [360, 480, 720, 1080, 2160]],
+    [480, 270, [270]],
+    [0, 0, []],
+  ]) {
+    assert.deepEqual(videoResolutions({ width, height }), expected);
+    assert.deepEqual(videoResolutions({ width: height, height: width }), expected);
+  }
 });

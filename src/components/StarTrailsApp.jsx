@@ -16,9 +16,14 @@ import {
   Text,
 } from 'jbx';
 
+import {
+  LIVE_PHOTO_FPS, LIVE_PHOTO_SECONDS, LIVE_PHOTO_MAX_FRAMES,
+  livePhotoSize, livePhotoJpeg, livePhotoMov,
+} from '../lib/livePhoto.js';
+
 import { BASE_PATH } from '../lib/constants.js';
 import { applySourceMetadata } from '../lib/exif.js';
-import { createStacker, downloadBlob, exportFileName } from '../lib/stackClient.js';
+import { createStacker, downloadBlob, downloadBlobs, exportFileName } from '../lib/stackClient.js';
 import {
   ensureReadPermission,
   folderNameFromFileList,
@@ -35,6 +40,7 @@ import {
   createVideoEncoder,
   planVideo,
   videoSize,
+  videoResolutions,
   FPS_OPTIONS,
   DEFAULT_FPS,
   DEFAULT_MIN_SECONDS,
@@ -42,13 +48,8 @@ import {
   MAX_MIN_SECONDS,
 } from '../lib/videoExport.js';
 
-// The page loads this by itself so the controls have something real under them
-// from the start: a still gallery could only show finished stacks, where the
-// whole point is the power and range handles moving. It is a short clip, and it
-// is cancelled the moment anyone opens their own footage.
-//
-// The page is served at /startrails with no trailing slash, so a relative URL
-// would resolve against the site root.
+// Load the sample on startup; cancel when the user opens a source.
+// Use the base path because relative URLs resolve against the site root.
 const SAMPLE = {
   poster: `${BASE_PATH}/example-startrail-preview.jpg`,
   name: 'example-startrail.mp4',
@@ -66,18 +67,17 @@ const POWER_SLIDER_STEPS = 1000;
 
 const SOURCE_LABEL = { video: 'Video', photos: 'Photos', folder: 'Folder' };
 
-// A jbx link that runs an action instead of navigating: the class carries the
-// look, the element stays a button so it focuses and Enter works.
+// Use link styling with native button keyboard behavior.
 const LINK_STYLE = { border: 0, background: 'none', padding: 0, font: 'inherit' };
 
-/** "every 3rd frame" reads better than "every 3 frames" for the sampling note. */
+/** Format the sampling interval as an ordinal. */
 function ordinal(value) {
   const teens = value % 100;
   if (teens >= 11 && teens <= 13) return `${value}th`;
   return `${value}${['th', 'st', 'nd', 'rd'][value % 10] || 'th'}`;
 }
 
-/** Loose photos have no folder to be named after, so they say what they are. */
+/** Generate a source label for loose photos. */
 function describePicks(picks) {
   if (!picks.length) return 'Selected files';
   if (picks.length === 1) return picks[0].name;
@@ -88,9 +88,7 @@ function formatFps(fps) {
   return fps.toFixed(2).replace(/\.?0+$/, '');
 }
 
-// Keep the useful low-power end physically wide while still offering the much
-// stronger values at the end of the control. The input itself stays linear;
-// only the value exposed to the stacker follows a quadratic curve.
+// Map the slider quadratically for finer control at low power values.
 function powerFromSlider(value) {
   const position = value / POWER_SLIDER_STEPS;
   const power = POWER_MIN + (POWER_MAX - POWER_MIN) * position ** 2;
@@ -114,8 +112,7 @@ function Card({ children, disabled = false }) {
   );
 }
 
-/** A named group of choices: the label on the left, the choices beside it, so
-    two adjacent groups read as two rows rather than one long list. */
+/** Labeled row of choices. */
 function OptionRow({ label, children }) {
   return (
     <div className="option-row">
@@ -125,9 +122,7 @@ function OptionRow({ label, children }) {
   );
 }
 
-/** An "i" beside a label that holds the explanation until it is asked for.
-    Hover or keyboard focus reveals it; the button is there so a tap works too,
-    where there is no hover to reveal anything. */
+/** Tooltip with hover, focus, and tap support. */
 function InfoTip({ label, children }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -166,7 +161,7 @@ function InfoTip({ label, children }) {
   );
 }
 
-/** The label and bar for whatever is running, wherever it is being shown. */
+/** Progress label and bar. */
 function Progress({ progress, percent }) {
   return (
     <div role="status" aria-live="polite">
@@ -335,11 +330,9 @@ export default function StarTrailsApp() {
   const canvasRef = useRef(null);
   const stackerRef = useRef(null);
   const eventRef = useRef(() => {});
-  // The worker only ever runs one restack at a time; a drag that outruns it
-  // parks its latest values here and fires them the moment it reports back.
+  // Queue the latest slider values while the worker is busy.
   const previewRef = useRef({ busy: false, queued: null, sent: null });
-  // Video extraction runs on the main thread and can take a while, so a second
-  // drop has to be able to call off the one in progress.
+  // Allow a new source to cancel video extraction.
   const extractRef = useRef(null);
   // New source details stay pending until the worker has a complete cache and
   // an initial composite ready to replace the visible preview.
@@ -349,8 +342,7 @@ export default function StarTrailsApp() {
   const skipNextPreviewRef = useRef(false);
   const folderInputRef = useRef(null);
   const playbackRef = useRef(null);
-  // A video export owns an encoder for as long as it runs, and every way out of
-  // it -- finished, cancelled, failed -- has to hand it back.
+  // Release the encoder on completion, cancellation, or failure.
   const videoJobRef = useRef(null);
 
   const [frames, setFrames] = useState([]);
@@ -360,9 +352,7 @@ export default function StarTrailsApp() {
   const [source, setSource] = useState('folder');
   const [videoSummary, setVideoSummary] = useState(null);
   const [isSample, setIsSample] = useState(false);
-  // showDirectoryPicker cannot be asked about while rendering on the server, so
-  // the first client render has to agree with the server and say no. Anything
-  // that branches on it waits for this.
+  // Defer directory-picker detection until mount to match server-rendered markup.
   const [mounted, setMounted] = useState(false);
   const canPickDirectory = mounted && supportsDirectoryPicker();
 
@@ -379,11 +369,7 @@ export default function StarTrailsApp() {
   const [first, setFirst] = useState(0);
   const [last, setLast] = useState(0);
   const selected = last - first + 1;
-  // The falloff every render path shares. Curve mode ignores `trail` and linear
-  // mode ignores `power`; sending both keeps the worker message flat. Linear's
-  // fixed step per frame is sized to the selection, so the ramp always reaches
-  // its faintest at the oldest selected frame -- widening the range is what
-  // makes the trails longer.
+  // Shared falloff parameters. Curve uses power; linear uses the selection length as trail.
   const look = useMemo(
     () => ({ fade, power, trail: selected, minOpacity: minOpacity / 100 }),
     [fade, minOpacity, power, selected]
@@ -391,13 +377,7 @@ export default function StarTrailsApp() {
   const [isPlaying, setIsPlaying] = useState(false);
 
   const [rotation, setRotation] = useState(0);
-  // Scale is held as a key rather than a factor: "Preview size" resolves against
-  // the current source, so a stored number stops matching any tab the moment a
-  // differently sized source is opened. Image and video keep separate picks --
-  // a video above preview size re-decodes every frame for every output frame,
-  // so it is not somewhere to arrive by accident.
-  const [imageScaleKey, setImageScaleKey] = useState('full');
-  const [videoScaleKey, setVideoScaleKey] = useState('preview');
+  const [videoResolution, setVideoResolution] = useState(1080);
   const [exportKind, setExportKind] = useState('image');
   const [fps, setFps] = useState(DEFAULT_FPS);
   const [minSeconds, setMinSeconds] = useState(DEFAULT_MIN_SECONDS);
@@ -418,9 +398,7 @@ export default function StarTrailsApp() {
   const exporting = status === 'exporting';
   const controlsDisabled = status !== 'ready';
   const mediaLoading = status === 'extracting' || status === 'loading';
-  // "Nothing of the viewer's own is open yet." The sample counts as nothing:
-  // it loads on its own, so gating on frames.length would hide Reopen a second
-  // after arrival, which is exactly when it is wanted.
+  // Keep Reopen available while the sample is displayed.
   const untouched = isSample || !frames.length;
 
   const stopPlayback = useCallback(() => {
@@ -431,15 +409,14 @@ export default function StarTrailsApp() {
     setIsPlaying(false);
   }, []);
 
-  // The one place an encoder is let go of, so no path out of a video export can
-  // leave one holding its buffers.
+  // Release encoder buffers for every export exit path.
   const discardVideoJob = useCallback(() => {
     const job = videoJobRef.current;
     videoJobRef.current = null;
-    job?.encoder.close();
+    job?.encoder?.close();
   }, []);
 
-  // --- worker plumbing ---------------------------------------------------
+  // Worker events.
 
   const sendPreview = useCallback((params) => {
     const stacker = stackerRef.current;
@@ -452,15 +429,31 @@ export default function StarTrailsApp() {
     stacker.preview(params);
   }, []);
 
-  // The worker hands back a bare canvas JPEG. Metadata is spliced on here
-  // rather than in the worker, which has to stay import-free.
+  // Add metadata here because the worker must stay import-free.
   const finishExport = useCallback(
     async (message) => {
+      const liveJob = videoJobRef.current;
+      if (liveJob?.kind === 'live') {
+        try {
+          const photo = await livePhotoJpeg(message.blob, liveJob.identifier, message.width, message.height);
+          if (!message.isCurrent() || videoJobRef.current !== liveJob) return;
+          liveJob.photo = photo;
+          liveJob.photoWidth = message.width;
+          liveJob.photoHeight = message.height;
+          liveJob.startSequence();
+        } catch (err) {
+          if (!message.isCurrent() || videoJobRef.current !== liveJob) return;
+          discardVideoJob();
+          setError(err.message);
+          setStatus('ready');
+          setProgress(null);
+        }
+        return;
+      }
       let blob = message.blob;
       let exifApplied = false;
 
-      // Frames extracted from a video are canvas JPEGs with no APP segments of
-      // their own, so there is nothing to carry over.
+      // Video frames have no source metadata.
       if (copyExif && source !== 'video') {
         try {
           const withExif = await applySourceMetadata(
@@ -472,7 +465,7 @@ export default function StarTrailsApp() {
           blob = withExif.blob;
           exifApplied = withExif.applied;
         } catch (err) {
-          // Metadata is a bonus; never lose a finished render over it.
+          // Keep the rendered image if metadata copying fails.
           exifApplied = false;
         }
       }
@@ -496,49 +489,55 @@ export default function StarTrailsApp() {
         })
       );
     },
-    [copyExif, first, frames, last, look, source]
+    [copyExif, first, frames, last, look, source, discardVideoJob]
   );
 
   const finishVideoExport = useCallback(
     async (message) => {
       const job = videoJobRef.current;
       if (!job) return;
-      videoJobRef.current = null;
-      // Every frame is in; the bar stays full while the file is written.
+      // Keep progress at 100% during file writing.
       setProgress({ phase: 'encode', done: 1, total: 1 });
 
       try {
         const blob = await job.encoder.finish(job.plan.loops);
-        if (!message.isCurrent()) return;
+        if (!message.isCurrent() || videoJobRef.current !== job) return;
+        // Photos pairs the JPEG and MOV by their embedded identifier.
+        let files = [{ blob, name: job.fileName }];
+        if (job.kind === 'live') {
+          const movie = await livePhotoMov(blob, job.identifier, job.stillTime, job.fps);
+          if (!message.isCurrent() || videoJobRef.current !== job) return;
+          files = [
+            { blob: job.photo, name: job.fileName },
+            { blob: movie, name: job.movieName },
+          ];
+        }
         setStatus('ready');
         setProgress(null);
         setResult({
-          kind: 'video',
+          kind: job.kind,
           width: job.size.width,
           height: job.size.height,
+          photoWidth: job.photoWidth,
+          photoHeight: job.photoHeight,
           frames: job.plan.totalOutputFrames,
           duration: job.plan.duration,
-          fps,
+          fps: job.fps,
+          // Retain Live Photo blobs for the individual download buttons.
+          files: job.kind === 'live' ? files : null,
         });
-        downloadBlob(
-          blob,
-          exportFileName({
-            firstName: frames[0].name,
-            lastName: frames[frames.length - 1].name,
-            ...look,
-            extension: job.encoder.extension,
-          })
-        );
+        downloadBlobs(files);
       } catch (err) {
         if (!message.isCurrent()) return;
         setError(err.message);
         setStatus('ready');
         setProgress(null);
       } finally {
+        if (videoJobRef.current === job) videoJobRef.current = null;
         job.encoder.close();
       }
     },
-    [fps, frames, look]
+    []
   );
 
   eventRef.current = (message) => {
@@ -617,9 +616,7 @@ export default function StarTrailsApp() {
         previewRef.current = { busy: false, queued: null, sent: null };
         discardVideoJob();
         setError(message.message);
-        // A failed load has no complete preview cache to restack. Export errors
-        // can return to the already-loaded preview, but aspect-ratio/decode
-        // errors must leave the controls disabled until another folder opens.
+        // Keep controls disabled after load errors. Export errors can reuse the loaded preview.
         if (message.phase === 'load' || message.phase === 'worker') {
           pendingLoadRef.current = null;
           cacheReadyRef.current = false;
@@ -658,11 +655,10 @@ export default function StarTrailsApp() {
     recallHandle().then((saved) => saved && setSavedFolder(saved));
   }, []);
 
-  // Any change to the look re-stacks the cached preview frames.
+  // Restack the preview when appearance settings change.
   useEffect(() => {
     if (!ready) return;
-    // A successful load already rendered these exact values into a temporary
-    // worker canvas before atomically committing them to the visible canvas.
+    // Skip parameters already rendered by the successful load.
     if (skipNextPreviewRef.current) {
       skipNextPreviewRef.current = false;
       return;
@@ -670,9 +666,7 @@ export default function StarTrailsApp() {
     sendPreview({ ...look, first, last, rotation });
   }, [ready, look, first, last, rotation, sendPreview]);
 
-  // The saved poster is frame 1, so the sample can hand off without a visual
-  // jump and then quickly reveal the complete trail. Controls stay inert until
-  // the sweep finishes, keeping the animation and range handles in lockstep.
+  // Animate from the poster frame to the full stack. Disable controls during the sweep.
   useEffect(() => {
     if (status !== 'intro') return;
     const finalFrame = frames.length - 1;
@@ -699,12 +693,11 @@ export default function StarTrailsApp() {
 
   useEffect(() => () => {
     if (playbackRef.current !== null) clearInterval(playbackRef.current);
-    videoJobRef.current?.encoder.close();
+    videoJobRef.current?.encoder?.close();
     videoJobRef.current = null;
   }, []);
 
-  // Loading a different source or starting an export invalidates the current
-  // frame indices, so playback cannot be allowed to outlive the ready state.
+  // Stop playback when loading or export invalidates the frame indices.
   useEffect(() => {
     if (status !== 'ready' && playbackRef.current !== null) stopPlayback();
   }, [status, stopPlayback]);
@@ -713,15 +706,12 @@ export default function StarTrailsApp() {
     setRotation((current) => (current + degrees + 360) % 360);
   }, []);
 
-  // --- opening folders ---------------------------------------------------
+  // Source loading.
 
-  // The single funnel every input path ends at, videos included: by this point a
-  // video has already become an array of frames.
+  // Load photo files or extracted video previews.
   const acceptFrames = useCallback(
     (nextFrames, name, nextHandle, kind = 'folder', details = {}) => {
-      // Opening photos or a folder abandons a video that is still being
-      // extracted; the video path manages its own controller and must not
-      // cancel itself here.
+      // Cancel video extraction when opening photos; video loading manages its own controller.
       if (kind !== 'video' && extractRef.current) {
         extractRef.current.abort();
         extractRef.current = null;
@@ -730,10 +720,9 @@ export default function StarTrailsApp() {
       setError(null);
       setResult(null);
 
-      // Invalidate a worker load immediately. Its messages carry a request ID
-      // too, but cancellation lets it release decoded proxies without doing
-      // the rest of the work.
+      // Cancel the worker load immediately to release decoded proxies.
       pendingLoadRef.current = null;
+      discardVideoJob();
       stackerRef.current.cancelLoad();
       cacheReadyRef.current = false;
 
@@ -788,7 +777,7 @@ export default function StarTrailsApp() {
         details.source
       );
     },
-    [frames.length, look, rotation]
+    [frames.length, look, rotation, discardVideoJob]
   );
 
   const acceptVideo = useCallback(
@@ -797,6 +786,7 @@ export default function StarTrailsApp() {
       const controller = new AbortController();
       extractRef.current = controller;
       pendingLoadRef.current = null;
+      discardVideoJob();
       stackerRef.current.cancelLoad();
       cacheReadyRef.current = false;
 
@@ -822,7 +812,7 @@ export default function StarTrailsApp() {
           source: descriptor,
         });
       } catch (err) {
-        // A newer drop cancelled this one; it owns the UI now.
+        // Ignore extraction cancelled by a newer source.
         if (controller.signal.aborted || err.name === 'AbortError') return;
         setError(err.message);
         setStatus(cacheReadyRef.current && frames.length ? 'ready' : 'idle');
@@ -831,15 +821,13 @@ export default function StarTrailsApp() {
         if (extractRef.current === controller) extractRef.current = null;
       }
     },
-    [acceptFrames, frames.length]
+    [acceptFrames, frames.length, discardVideoJob]
   );
 
   // Prebuilt demo previews share the source-loading cancellation controller.
   // The original video is fetched lazily by the renderer.
   const loadSample = useCallback(async () => {
-    // A user can select a folder in the short idle window before this deferred
-    // task runs. Pending or committed user frames take precedence just like an
-    // in-progress video extraction does.
+    // Skip sample loading if a user source is loading or already open.
     if (extractRef.current || pendingLoadRef.current || cacheReadyRef.current) return;
     const controller = new AbortController();
     extractRef.current = controller;
@@ -876,8 +864,7 @@ export default function StarTrailsApp() {
     const idle = typeof requestIdleCallback === 'function';
     const handle = idle ? requestIdleCallback(start, { timeout: 1000 }) : setTimeout(start, 200);
     return () => (idle ? cancelIdleCallback(handle) : clearTimeout(handle));
-    // Runs once; loadSample is stable enough for the mount pass and a rerun
-    // would be refused by the extractRef guard anyway.
+    // Load the sample once on mount. extractRef prevents duplicate loading.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -887,7 +874,7 @@ export default function StarTrailsApp() {
       setSavedFolder(picked.handle);
       acceptFrames(picked.frames, picked.name, picked.handle);
     } catch (err) {
-      // AbortError just means the picker was dismissed.
+      // Ignore picker dismissal.
       if (err.name !== 'AbortError') setError(err.message);
     }
   }, [acceptFrames]);
@@ -948,8 +935,7 @@ export default function StarTrailsApp() {
     [acceptFrames]
   );
 
-  // Clicking the zone opens one picker that takes either, so it has to sort
-  // out which was chosen. A video comes alone; photos come in a heap.
+  // Accept one video or multiple photos.
   const onPickInput = useCallback(
     (event) => {
       const picked = Array.from(event.target.files || []);
@@ -969,8 +955,7 @@ export default function StarTrailsApp() {
     [acceptFrames, acceptVideo]
   );
 
-  // Chromium can hand over a re-openable handle; everywhere else falls back to
-  // the plain folder upload. Either way it is the same button.
+  // Use a persistent directory handle when supported, otherwise a folder input.
   const openFolder = useCallback(() => {
     if (canPickDirectory) {
       openWithPicker();
@@ -985,37 +970,38 @@ export default function StarTrailsApp() {
   const turned = rotation === 90 || rotation === 270;
   const hasDimensions = natural.width > 0 && natural.height > 0;
   const previewScale = natural.width ? preview.width / natural.width : 1;
-  const scaleOptions = [
-    { key: 'full', label: 'Full', factor: 1 },
-    { key: 'half', label: 'Half', factor: 0.5 },
-    {
-      key: 'preview',
-      label: 'Preview',
-      factor: hasDimensions ? previewScale : null,
-    },
-  ];
+  const resolutions = videoResolutions(natural);
+  const wantsLivePhoto = exportKind === 'live';
   const wantsVideo = exportKind === 'video';
-  const scaleKey = wantsVideo ? videoScaleKey : imageScaleKey;
-  const setScaleKey = wantsVideo ? setVideoScaleKey : setImageScaleKey;
-  const scale = scaleOptions.find((option) => option.key === scaleKey).factor ?? 1;
+  const wantsMotion = wantsVideo || wantsLivePhoto;
+  const resolution = resolutions.includes(videoResolution)
+    ? videoResolution
+    : Math.min(1080, resolutions.at(-1) ?? 1080);
+  const scale = wantsVideo && hasDimensions
+    ? resolution / Math.min(natural.width, natural.height)
+    : 1;
   const outWidth = hasDimensions
     ? Math.max(1, Math.round((turned ? natural.height : natural.width) * scale))
     : null;
   const outHeight = hasDimensions
     ? Math.max(1, Math.round((turned ? natural.width : natural.height) * scale))
     : null;
-  // The window slides from frame 0 to the last position that still fits, one
-  // position per video frame -- the same sweep the play button previews.
+  // One video frame per window position, matching preview playback.
   const windowWidth = last - first;
   const allSelected = selected >= totalFrames;
   const videoPlan = planVideo({ totalFrames, windowWidth, fps, minSeconds });
+  // Use the export plan for the sampling label.
+  const livePlan = planVideo({
+    totalFrames, windowWidth, fps: LIVE_PHOTO_FPS, minSeconds: 0,
+    maxFrames: LIVE_PHOTO_MAX_FRAMES, stillPosition: first,
+  });
   const videoOut = hasDimensions
     ? videoSize({ width: outWidth, height: outHeight })
     : null;
   const videoDecodes =
     scale > previewScale ? videoPlan.cycleFrames * selected : 0;
 
-  // --- export ------------------------------------------------------------
+  // Export.
 
   const startExport = useCallback(() => {
     stopPlayback();
@@ -1032,63 +1018,77 @@ export default function StarTrailsApp() {
       ...look,
       first,
       last,
-      scale,
+      scale: 1,
       rotation,
     });
-  }, [first, last, look, rotation, scale, stopPlayback]);
+  }, [first, last, look, rotation, stopPlayback]);
 
-  // Only the loop is composited. Repeating it to reach the minimum length is the
-  // muxer's job, so a longer video is not a longer render.
+  // Composite one loop; the muxer repeats its encoded packets.
   const startVideoExport = useCallback(async () => {
+    // Reserve the job before codec detection to handle cancellation and concurrent clicks.
+    if (videoJobRef.current) return;
     stopPlayback();
     setError(null);
     setResult(null);
-
-    const plan = planVideo({ totalFrames, windowWidth, fps, minSeconds });
-    const size = videoSize({ width: outWidth, height: outHeight });
-
-    let encoder;
-    try {
-      // Probing the codecs can fail outright, and it is much friendlier to say
-      // so before the progress bar appears than half way through.
-      encoder = await createVideoEncoder({ ...size, fps });
-    } catch (err) {
-      setError(err.message);
-      return;
-    }
-
-    // After the await, not before: two clicks landing during the codec probe
-    // would otherwise both build an encoder and only one would be handed back.
-    discardVideoJob();
-    videoJobRef.current = { plan, size, encoder };
+    const exportFps = wantsLivePhoto ? LIVE_PHOTO_FPS : fps;
+    const plan = planVideo({
+      totalFrames, windowWidth, fps: exportFps,
+      minSeconds: wantsLivePhoto ? 0 : minSeconds,
+      ...(wantsLivePhoto
+        ? { maxFrames: LIVE_PHOTO_MAX_FRAMES, stillPosition: first }
+        : {}),
+    });
+    const size = wantsLivePhoto
+      ? livePhotoSize({ width: turned ? natural.height : natural.width, height: turned ? natural.width : natural.height })
+      : videoSize({ width: outWidth, height: outHeight });
+    const job = {
+      kind: wantsLivePhoto ? 'live' : 'video', plan, size, fps: exportFps,
+      identifier: wantsLivePhoto ? crypto.randomUUID() : null,
+      // Map the still to its output frame after sampling.
+      stillTime: plan.stillFrame / exportFps,
+      encoder: null,
+    };
+    videoJobRef.current = job;
     previewRef.current = { busy: false, queued: null, sent: null };
     setStatus('exporting');
-    setProgress({ phase: 'sequence', done: 0, total: plan.cycleFrames });
-    stackerRef.current.exportSequence(
-      {
-        ...look,
-        windowWidth,
-        scale,
-        rotation,
-      },
-      async (bitmap, index, total) => {
-        await encoder.add(bitmap, index);
-        setProgress({ phase: 'sequence', done: index + 1, total });
-      }
-    );
-  }, [
-    fps,
-    look,
-    minSeconds,
-    outHeight,
-    outWidth,
-    rotation,
-    scale,
-    stopPlayback,
-    totalFrames,
-    windowWidth,
-    discardVideoJob,
-  ]);
+    setProgress({ phase: 'encode', done: 0, total: 1 });
+    try {
+      const encoder = await createVideoEncoder({ ...size, fps: exportFps, livePhoto: wantsLivePhoto });
+      if (videoJobRef.current !== job) { encoder.close(); return; }
+      job.encoder = encoder;
+      // Use a shared filename stem and avoid collisions with JPEG exports.
+      job.fileName = exportFileName({
+        firstName: frames[0].name, lastName: frames[frames.length - 1].name,
+        ...look, suffix: wantsLivePhoto ? '-live' : '',
+        extension: wantsLivePhoto ? 'jpg' : encoder.extension,
+      });
+      job.movieName = wantsLivePhoto ? job.fileName.replace(/\.jpg$/, '.mov') : null;
+      job.startSequence = () => {
+        setProgress({ phase: 'sequence', done: 0, total: plan.cycleFrames });
+        stackerRef.current.exportSequence(
+          { ...look, windowWidth, scale: wantsLivePhoto ? size.scale : scale, rotation,
+            stride: plan.stride, startPosition: plan.startPosition },
+          async (bitmap, index, total) => {
+            await encoder.add(bitmap, index);
+            if (videoJobRef.current === job)
+              setProgress({ phase: 'sequence', done: index + 1, total });
+          }
+        );
+      };
+      if (wantsLivePhoto) {
+        setProgress({ phase: 'export', done: 0, total: selected });
+        stackerRef.current.exportImage({ ...look, first, last, scale: 1, rotation, quality: 1 });
+      } else job.startSequence();
+    } catch (err) {
+      if (videoJobRef.current !== job) return;
+      discardVideoJob();
+      setError(err.message);
+      setStatus('ready');
+      setProgress(null);
+    }
+  }, [fps, look, minSeconds, outHeight, outWidth, rotation, scale, stopPlayback,
+    totalFrames, windowWidth, discardVideoJob, wantsLivePhoto, natural, turned,
+    first, last, frames, selected]);
 
   const cancelExport = useCallback(() => {
     discardVideoJob();
@@ -1158,11 +1158,7 @@ export default function StarTrailsApp() {
     <div className="app">
       <Space h={2} />
 
-      {/* The zone takes either kind of source, by drop or by click -- it is a
-          label rather than a jbx Dropzone (a div) so the click opens the
-          picker with no handler of its own. The input is kept off the flow
-          rather than stretched over the zone the way jbx does it: a file
-          input under the pointer would swallow the drop. */}
+      {/* The label opens the file picker. Keep the input outside the drop hit area. */}
       <label
         className="jbx-dropzone"
         style={{ position: 'relative' }}
@@ -1176,8 +1172,7 @@ export default function StarTrailsApp() {
           style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
           onChange={onPickInput}
         />
-        {/* Both lines are one block, the way img2css groups them, so the zone
-            centres the pair instead of spreading them as two flex items. */}
+        {/* Center both lines as one block. */}
         <div>
           <Text>Drop photos or a video here</Text>
           <Text>or click to select</Text>
@@ -1186,8 +1181,7 @@ export default function StarTrailsApp() {
 
       <Space h={0.5} />
 
-      {/* Whole folders are the quieter case, so they sit under the zone as a
-          link rather than competing with it. */}
+      {/* Folder picker. */}
       <SmallText>
         <button type="button" className="jbx-a" style={LINK_STYLE} onClick={openFolder}>
           Open a folder instead
@@ -1229,9 +1223,7 @@ export default function StarTrailsApp() {
           '--preview-display-width': `${
             Math.min(640, (turned ? natural.height : natural.width) / 2)
           }px`,
-          // Lets the stylesheet trade width for height against a viewport cap,
-          // which is what keeps a portrait sequence from pushing the controls
-          // off the bottom of the screen.
+          // Size the preview by aspect ratio and viewport height.
           '--preview-aspect':
             (turned ? natural.height : natural.width) /
             (turned ? natural.width : natural.height),
@@ -1405,7 +1397,7 @@ export default function StarTrailsApp() {
           <OptionRow label="Format">
             <Tabs>
               <Tab
-                active={!wantsVideo}
+                active={exportKind === 'image'}
                 aria-disabled={controlsDisabled}
                 onClick={() => !controlsDisabled && setExportKind('image')}
               >
@@ -1418,29 +1410,50 @@ export default function StarTrailsApp() {
               >
                 Video
               </Tab>
+              <Tab
+                active={wantsLivePhoto}
+                aria-disabled={controlsDisabled}
+                onClick={() => !controlsDisabled && setExportKind('live')}
+              >
+                Live Photo
+              </Tab>
             </Tabs>
           </OptionRow>
 
-          <OptionRow label="Size">
-            <Tabs>
-              {scaleOptions.map((option) => (
-                <Tab
-                  key={option.key}
-                  active={scaleKey === option.key}
-                  aria-disabled={controlsDisabled || option.factor === null}
-                  onClick={() => {
-                    if (!controlsDisabled && option.factor !== null)
-                      setScaleKey(option.key);
-                  }}
-                >
-                  {option.label}
-                </Tab>
-              ))}
-            </Tabs>
-          </OptionRow>
+          {wantsVideo && (
+            <OptionRow label="Size">
+              <Tabs>
+                {resolutions.map((option) => (
+                  <Tab
+                    key={option}
+                    active={resolution === option}
+                    aria-disabled={controlsDisabled}
+                    onClick={() => {
+                      if (!controlsDisabled) setVideoResolution(option);
+                    }}
+                  >
+                    {option === 2160 ? '4K' : option}
+                  </Tab>
+                ))}
+              </Tabs>
+            </OptionRow>
+          )}
           <Space h={0.5} />
 
-          {wantsVideo ? (
+          {wantsLivePhoto ? (
+            <SmallText>
+              Full-resolution photo, kept at the size the Image tab would export.
+              The animation runs {livePlan.cycleDuration.toFixed(1)} s at {LIVE_PHOTO_FPS} fps,
+              HEVC where the browser can encode it and H.264 otherwise, 1440 px on the
+              long side — what iOS pairs with its own stills.
+              {livePlan.sampled
+                ? ` The sweep is ${livePlan.positions} positions, sampled 1 in ${livePlan.stride} to stay inside the ${LIVE_PHOTO_SECONDS}-second limit.`
+                : ''}
+              {' '}Saves a matching JPEG and MOV — nothing to unzip. Select both and drag
+              them into Photos on Mac and they land as one Live Photo, ready to send
+              on to iPhone or iPad over iCloud Photos or AirDrop.
+            </SmallText>
+          ) : wantsVideo ? (
             <>
               <SmallText>
                 {videoOut ? `${videoOut.width} × ${videoOut.height} ` : ''}MP4 at{' '}
@@ -1491,14 +1504,13 @@ export default function StarTrailsApp() {
           ) : (
             <>
               <SmallText>
-                {outWidth} × {outHeight} JPEG, quality 95.
+                {outWidth} × {outHeight} JPEG, full resolution, quality 95.
                 {hasDimensions && scale === 1
                   ? ' Full size is slower because every frame is decoded again.'
                   : ''}
               </SmallText>
 
-              {/* Frames extracted from a video are canvas JPEGs with no metadata
-                  of their own, so there is nothing to offer. */}
+              {/* Video frames have no source metadata. */}
               {hasFrames && source !== 'video' && (
                 <>
                   <Space h={1} />
@@ -1518,13 +1530,12 @@ export default function StarTrailsApp() {
           )}
         </div>
 
-        {/* Outside the control group so it stays readable while the controls
-            are inert. A full selection leaves the window nowhere to slide. */}
-        {wantsVideo && allSelected && (
+        {/* Keep this note visible while controls are disabled. A full selection cannot slide. */}
+        {wantsMotion && allSelected && (
           <>
             <Space h={1} />
             <Text style={{ color: 'var(--accent-color)' }}>
-              Video export requires selecting less frames
+              Motion export requires selecting fewer frames
             </Text>
           </>
         )}
@@ -1532,23 +1543,23 @@ export default function StarTrailsApp() {
         <Space h={1} />
         <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
           <Button
-            onClick={wantsVideo ? startVideoExport : startExport}
-            disabled={controlsDisabled || (wantsVideo && allSelected)}
+            onClick={wantsMotion ? startVideoExport : startExport}
+            disabled={controlsDisabled || (wantsMotion && allSelected)}
           >
             {exporting
-              ? wantsVideo
+              ? wantsMotion
                 ? 'Rendering…'
                 : 'Stacking…'
-              : wantsVideo
+              : wantsLivePhoto
+                ? 'Export Live Photo'
+                : wantsVideo
                 ? 'Export video'
                 : 'Export JPEG'}
           </Button>
           {exporting && <Button onClick={cancelExport}>Cancel</Button>}
         </Inline>
 
-        {/* Beside the button rather than over the preview: on a phone the
-            preview is scrolled well off the top by the time anyone presses
-            export, so progress shown up there is progress nobody sees. */}
+        {/* Keep export progress beside the button so it remains visible on mobile. */}
         {progress && exporting && (
           <>
             <Space h={0.75} />
@@ -1562,7 +1573,13 @@ export default function StarTrailsApp() {
           <>
             <Space h={1} />
             <Text>
-              {result.kind === 'video' ? (
+              {result.kind === 'live' ? (
+                <>
+                  Saved a Live Photo: {result.photoWidth} × {result.photoHeight} photo
+                  and {result.duration.toFixed(1)} s of {result.width} × {result.height} video.
+                  Select both files and drag them into Photos on Mac together.
+                </>
+              ) : result.kind === 'video' ? (
                 <>
                   Saved a {result.duration.toFixed(1)} s {result.width} ×{' '}
                   {result.height} video, {result.frames} frames at {result.fps}{' '}
@@ -1576,6 +1593,26 @@ export default function StarTrailsApp() {
                 </>
               )}
             </Text>
+
+            {/* Allow each file to be saved again if the browser blocks a download. */}
+            {result.kind === 'live' && (
+              <>
+                <Space h={0.75} />
+                <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
+                  {result.files.map((file) => (
+                    <Button key={file.name} onClick={() => downloadBlob(file.blob, file.name)}>
+                      {file.name.endsWith('.mov') ? 'Save video again' : 'Save photo again'}
+                    </Button>
+                  ))}
+                </Inline>
+                <Space h={0.5} />
+                <SmallText>
+                  Saving these in an iOS browser will not create a Live Photo. Import
+                  them on a Mac, then use iCloud Photos or AirDrop to get it onto the
+                  phone.
+                </SmallText>
+              </>
+            )}
           </>
         )}
       </Card>
@@ -1584,8 +1621,7 @@ export default function StarTrailsApp() {
         <>
           <Space h={1} />
 
-          {/* Everything descriptive lives down here. None of it is needed to
-              work the controls, and the space above them is worth more. */}
+          {/* Source details. */}
           <Card>
             <HeaderH4>Source</HeaderH4>
             <Space h={0.5} />

@@ -2,7 +2,8 @@
 
 A tool for creating star trail images from timelapse photography.
 
-Star trails are created by combining multiple long-exposure photos, picking the brightest pixel from all images for every pixel in the output (aka "lighten" blend mode). This tool adds artistic control through a power falloff curve. Earlier images in the sequence can be dimmed by a configurable power factor, creating smoother, more distinctive tails for each star.
+Combines photos with `lighten` blending, keeping the brightest pixel at each
+position. A configurable opacity curve dims earlier frames to produce faded trails.
 
 For best results:
 - Use 20-40 second exposures
@@ -24,9 +25,8 @@ cd cli
 pnpm install
 ```
 
-This folder keeps its own `package.json` so installing the web app never pulls
-in a native module. There is also a browser version of this tool that needs no
-install at all -- see the [project README](../README.md).
+CLI dependencies are installed separately from the web app.
+For the browser version, see the [project README](../README.md).
 
 ## Usage
 
@@ -48,7 +48,7 @@ node star-trails.js [options]
 
 ## Examples
 
-Basic usage with just source directory:
+Source directory:
 ```bash
 node star-trails.js --src=/path/to/images
 ```
@@ -68,7 +68,7 @@ Custom output path:
 node star-trails.js --src=/path/to/images --out=my-star-trail.jpg
 ```
 
-With minimum opacity (ensures all images contribute at least 20%):
+Minimum opacity of 20%:
 ```bash
 node star-trails.js --src=/path/to/images --min-opacity=20
 ```
@@ -97,8 +97,7 @@ node star-trails.js --src=./raw-photos --first=DSCF0100.jpg --last=DSCF0200.jpg 
 
 ## Known differences from the web version
 
-Both are the same algorithm, but `--exif` here shells out to
-`exiftool -TagsFromFile`, which copies the source tags verbatim:
+CLI `--exif` uses `exiftool -TagsFromFile` and copies source tags verbatim:
 
 - The source's `Orientation` is copied even though node-canvas already rotated
   the pixels on load, so an oriented sequence exports sideways.

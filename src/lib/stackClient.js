@@ -1,7 +1,7 @@
 import { fetchVideoFile, openVideo } from './video.js';
 import { checkAbort, isCurrent } from './processing.js';
 
-/** Owns source generations, worker jobs, and the one active video decoder. */
+/** Manage source generations, worker jobs, and the active video decoder. */
 export function createStacker({ canvas, onEvent }) {
   const makeWorker = () =>
     new Worker(new URL('../workers/stack.worker.js', import.meta.url), {
@@ -100,16 +100,13 @@ export function createStacker({ canvas, onEvent }) {
       }
     }
   }
-  // One window position of a video export: handed to the consumer, then
-  // acknowledged so the worker composites the next one. Exactly one bitmap is
-  // ever in flight, however far the compositing runs ahead of the encoder.
+  // Acknowledge each frame after consumption to limit pending bitmaps to one.
   async function consumeSequenceFrame(message) {
     const consume = onSequenceFrame;
     try {
       if (consume) await consume(message.bitmap, message.index, message.total);
     } catch (err) {
-      // A cancel while the consumer was mid-encode tears the encoder down under
-      // it, so the throw that follows is the cancel, not a failure to report.
+      // Ignore encoder errors caused by cancellation.
       if (onSequenceFrame !== consume) return;
       stopRender();
       onEvent({ type: 'error', phase: 'sequence', message: err.message });
@@ -230,10 +227,7 @@ export function createStacker({ canvas, onEvent }) {
     exportImage(params) {
       startRender('export', params);
     },
-    /**
-     * Composites every position of the sliding window. `onFrame` is awaited
-     * before the next one is asked for, so it can encode at its own pace.
-     */
+    /** Composite each window position, awaiting onFrame before continuing. */
     exportSequence(params, onFrame) {
       startRender('sequence', params);
       onSequenceFrame = onFrame;
@@ -250,11 +244,7 @@ export function createStacker({ canvas, onEvent }) {
   };
 }
 
-/**
- * Default output name, echoing the CLI's `[first]-[last]-p[power][-mo[min]]`.
- * Linear mode swaps the `p` token for `l[trail]` so the two modes cannot
- * overwrite each other's files.
- */
+/** Include frame range and falloff settings in the output filename. */
 export function exportFileName({
   firstName,
   lastName,
@@ -262,12 +252,13 @@ export function exportFileName({
   power,
   trail,
   minOpacity,
+  suffix = '',
   extension = 'jpg',
 }) {
   const stem = (name) => name.replace(/\.[^.]+$/, '');
   const falloff = fade === 'linear' ? `l${trail}` : `p${power}`;
   const mo = minOpacity > 0 ? `-mo${Math.round(minOpacity * 100)}` : '';
-  return `${stem(firstName)}-${stem(lastName)}-${falloff}${mo}.${extension}`;
+  return `${stem(firstName)}-${stem(lastName)}-${falloff}${mo}${suffix}.${extension}`;
 }
 
 export function downloadBlob(blob, fileName) {
@@ -278,6 +269,15 @@ export function downloadBlob(blob, fileName) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  // Revoked on the next tick so the click has taken the URL.
+  // Revoke after the click has started the download.
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** Stagger paired downloads to avoid same-tick browser restrictions.
+ * The result panel provides individual download buttons. */
+export function downloadBlobs(files) {
+  files.forEach((file, index) => {
+    if (index === 0) downloadBlob(file.blob, file.name);
+    else setTimeout(() => downloadBlob(file.blob, file.name), index * 300);
+  });
 }

@@ -17,8 +17,7 @@
   opacity: 0.55;
 }
 
-/* Choices belong side by side. A jbx `Tabs` is a plain div, so its tabs would
-   otherwise stack full width and two adjacent groups would read as one list. */
+/* Display tabs side by side. */
 .jbx-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -30,9 +29,7 @@
   padding-inline: calc(var(--size) * 0.6);
 }
 
-/* One row per group: what it sets, then its choices. The label is what tells
-   Format apart from Size when the two rows sit together, and the shared label
-   column lines the groups up instead of pushing them to opposite edges. */
+/* Align choice groups in rows with a shared label column. */
 .option-row {
   display: flex;
   flex-wrap: wrap;
@@ -49,15 +46,11 @@
 .option-row .jbx-tabs,
 .option-row .jbx-inline {
   flex: 0 1 auto;
-  /* Keep a group whole: rather than splitting its choices across two lines
-     beside the label, it drops to a line of its own -- unless it is wider than
-     the row, where wrapping inside it is the only thing that fits. */
+  /* Wrap the whole group first, then wrap choices if needed. */
   min-width: min(100%, max-content);
 }
 
-/* An explanation that stays out of the way until it is wanted: the circled
-   "i" sits inline in the label, and the note it holds is only laid out when
-   the tip is hovered, focused, or tapped open. */
+/* Show the tooltip on hover, focus, or tap. */
 .info-tip {
   position: relative;
   display: inline-flex;
@@ -89,8 +82,7 @@
 }
 
 .info-tip-bubble {
-  /* Hidden rather than transparent, so it is out of the accessibility tree and
-     cannot be clicked through to while it is closed. */
+  /* Exclude closed tooltips from hit testing and the accessibility tree. */
   display: none;
   position: absolute;
   z-index: 20;
@@ -101,7 +93,7 @@
   padding: 0.6rem 0.7rem;
   border: 1px solid #80808040;
   border-radius: 8px;
-  /* The page background, so the bubble reads as floating above the card. */
+  /* Match the page background. */
   background-color: #fdfdfd;
   box-shadow: 0 6px 20px #00000026;
   font-size: var(--font-size-small);
@@ -117,15 +109,12 @@
   display: block;
 }
 
-/* Buttons standing in a tab-height row, so a group of them keeps the row the
-   same height as one holding tabs. */
+/* Match the tab row height. */
 .option-row .option-button {
   height: var(--control-height-compact);
 }
 
-/* A frame interval reads like a video cropper: one rail, with an independently
-   focusable handle at each end. The native ranges still provide all keyboard
-   and pointer behavior; only their duplicate rails are replaced here. */
+/* Share one rail between two native range inputs; retain keyboard and pointer support. */
 .frame-range {
   position: relative;
   height: var(--range-touch-target);
@@ -156,9 +145,7 @@
   background-color: var(--accent-color);
 }
 
-/* The coloured interval is also a handle: dragging it moves both endpoints
-   together. Its touch-sized hit area overlaps the endpoint thumbs without
-   changing the visible rail. */
+/* Drag the interval to move both endpoints. The hit area extends beyond the rail. */
 .frame-range-selection {
   position: absolute;
   z-index: 1;
@@ -203,8 +190,7 @@
   z-index: 3;
 }
 
-/* When the interval collapses, leave the handle that can expand back toward
-   the middle on top. The focused handle always wins during an active drag. */
+/* When endpoints overlap, prioritize the handle that can expand the range, or the focused handle. */
 .frame-range.-first-on-top .jbx-range:first-child {
   z-index: 4;
 }
@@ -245,11 +231,8 @@
   padding: 0;
 }
 
-/* The stacked preview. The canvas is always in the DOM, because it can only be
-   handed to the worker once and that happens on mount. */
-/* Never taller than this much of the viewport, so the Look controls stay on
-   screen for a portrait sequence. Capping the width against the aspect ratio,
-   rather than capping the height, is what keeps the canvas undistorted. */
+/* Keep the preview canvas mounted. */
+/* Cap preview width by aspect ratio and viewport height to keep controls visible. */
 .stage {
   position: relative;
   width: min(
@@ -334,8 +317,7 @@
   transition: width 0.12s linear;
 }
 
-/* The same readout on the card instead of over the preview, so it needs the
-   dark-on-light inverse of the overlay's colors. */
+/* Use dark text for progress displayed on the card. */
 .export-progress .bar {
   background-color: #00000018;
 }
@@ -380,8 +362,7 @@
   }
 }
 
-/* Source details, below the controls: label/value pairs that keep their columns
-   when a filename runs long. */
+/* Keep source labels aligned when filenames wrap. */
 .stats {
   margin: 0;
   display: grid;

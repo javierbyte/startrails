@@ -37,8 +37,7 @@ async function main() {
     process.exit(1);
   }
 
-  // --trail switches the falloff from a curve stretched across the range to a
-  // linear ramp with a fixed step per frame, so the trails keep their length.
+  // --trail selects linear falloff with a fixed 1/trail opacity step.
   const trail = args['trail'] ? parseInt(args['trail'], 10) : null;
   if (trail !== null && (isNaN(trail) || trail < 1)) {
     console.error('Error: --trail must be a frame count of 1 or more');
@@ -116,8 +115,7 @@ async function main() {
   const ctx = canvas.getContext('2d');
   ctx.globalCompositeOperation = 'lighten';
 
-  // Past the trail a linear ramp reaches zero, so those frames are not worth
-  // loading at all. A floor keeps every frame in the stack.
+  // Skip zero-opacity frames in linear mode unless a positive floor is set.
   const start =
     trail !== null && minOpacity === 0
       ? Math.max(0, files.length - trail)

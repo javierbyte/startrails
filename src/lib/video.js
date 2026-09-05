@@ -217,8 +217,7 @@ export async function loadSampleFrames(basePath, { signal, onProgress } = {}) {
   if (!response.ok) throw new Error('The sample previews could not be loaded.');
   const manifest = await response.json();
   const frames = [];
-  // Four small requests at a time avoid a round trip per frame without an
-  // unbounded download burst. Store by index to preserve chronological order.
+  // Fetch four previews concurrently and store by index to preserve frame order.
   for (let start = 0; start < manifest.frames.length; start += 4) {
     await Promise.all(
       manifest.frames.slice(start, start + 4).map(async (name, offset) => {

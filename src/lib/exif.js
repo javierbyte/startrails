@@ -1,13 +1,5 @@
-// Canvas encoders drop every APP segment, so a stacked export comes out with no
-// camera, no lens, no date. The CLI fixed that by shelling out to
-// `exiftool -TagsFromFile <first frame>`; here we do the same thing by hand:
-// lift the metadata segments out of the first frame's bytes and splice them into
-// the JPEG the canvas produced.
-//
-// Everything below works on Uint8Array. JPEG is a list of segments: 0xFF, a
-// marker byte, then (for most markers) a big-endian 2-byte length that includes
-// itself, then the payload. Metadata lives in APP1 (Exif, XMP) and APP2 (ICC),
-// all of which sit before the start-of-scan marker.
+// Copy APP1 (Exif, XMP) and APP2 (ICC) metadata from the first frame
+// into the canvas-encoded JPEG.
 
 const SOI = 0xd8;
 const SOS = 0xda;
@@ -20,10 +12,7 @@ const EXIF_ID = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00]; // "Exif\0\0"
 const XMP_ID = 'http://ns.adobe.com/xap/1.0/\0';
 const ICC_ID = 'ICC_PROFILE\0';
 
-// How much of the source file to read looking for metadata. Exif and XMP are
-// capped at 64KB per segment and ICC is chunked into 64KB pieces, so the first
-// 256KB covers a normal camera file; the larger reads are for files with a big
-// profile or extended XMP.
+// Read progressively larger headers for files with large ICC profiles or XMP.
 const READ_STEPS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 
 function startsWith(bytes, offset, ascii) {
@@ -40,8 +29,7 @@ function startsWithBytes(bytes, offset, expected) {
   return true;
 }
 
-// Walks the segment list. Returns null when it runs off the end of a truncated
-// read, so the caller knows to read more rather than treating it as "no EXIF".
+// Return done:false for incomplete segments so the caller can read more bytes.
 function collectSegments(bytes) {
   if (bytes[0] !== 0xff || bytes[1] !== SOI) return { done: true, segments: null };
 
@@ -77,8 +65,7 @@ function collectSegments(bytes) {
     } else if (marker === APP1 && !found.xmp && startsWith(bytes, payload, XMP_ID)) {
       found.xmp = bytes.slice(offset, segmentEnd);
     } else if (marker === APP2 && startsWith(bytes, payload, ICC_ID)) {
-      // A profile larger than 64KB is split across several APP2 segments that
-      // have to stay in order; copy them through untouched.
+      // Preserve the order of ICC chunks across APP2 segments.
       found.icc.push(bytes.slice(offset, segmentEnd));
     }
 
@@ -88,11 +75,8 @@ function collectSegments(bytes) {
   return { done: false, segments: found };
 }
 
-/**
- * Reads the metadata segments out of a source image, growing the read until the
- * segment list is complete. Returns null for a non-JPEG (a PNG frame has no
- * EXIF to copy) or a file with nothing worth carrying over.
- */
+/** Read JPEG metadata with progressively larger reads, up to READ_STEPS.
+ * Return null for non-JPEG files or missing metadata. */
 export async function readSourceMetadata(file) {
   let result = null;
 
@@ -109,11 +93,7 @@ export async function readSourceMetadata(file) {
   return segments;
 }
 
-// --- TIFF patching -------------------------------------------------------
-//
-// The Exif payload is a TIFF block. We only ever overwrite values that are
-// already there, never add or resize an entry, so every offset inside the block
-// stays valid and no rewrite is needed.
+// Patch existing TIFF values without resizing entries or changing offsets.
 
 const TAG_ORIENTATION = 0x0112;
 const TAG_EXIF_IFD_POINTER = 0x8769;
@@ -164,10 +144,7 @@ function writeScalar(tiff, entry, type, value) {
   else if (type === TYPE_LONG) tiff.setU32(entry + 8, value);
 }
 
-/**
- * Fixes up a copied Exif segment so it describes the export rather than the
- * first frame. Mutates `segment` in place.
- */
+/** Update export dimensions and orientation in place; unlink the source thumbnail. */
 export function patchExifSegment(segment, outputWidth, outputHeight) {
   const tiff = makeTiffView(segment);
   if (!tiff) return;
@@ -178,19 +155,14 @@ export function patchExifSegment(segment, outputWidth, outputHeight) {
   let exifIfd = 0;
   const ifd0End = walkIfd(tiff, ifd0, (entry, tag, type) => {
     if (tag === TAG_ORIENTATION) {
-      // The bitmap handed to the canvas was already rotated, because
-      // createImageBitmap defaults to imageOrientation: 'from-image'. Carrying
-      // the source's orientation through would make viewers rotate it a second
-      // time.
+      // Reset orientation because createImageBitmap already applied it.
       writeScalar(tiff, entry, type, 1);
     } else if (tag === TAG_EXIF_IFD_POINTER) {
       exifIfd = tiff.u32(entry + 8);
     }
   });
 
-  // Drop IFD1, the embedded thumbnail, so Finder and Lightroom don't preview a
-  // single unstacked frame. Its bytes stay in the file as dead weight, which is
-  // cheaper than rebuilding the block to reclaim them.
+  // Unlink IFD1 to disable the source thumbnail. Leave its bytes to preserve offsets.
   if (ifd0End + 4 <= segment.length) tiff.setU32(ifd0End, 0);
 
   if (exifIfd > 0 && exifIfd + 2 <= segment.length) {
@@ -201,14 +173,8 @@ export function patchExifSegment(segment, outputWidth, outputHeight) {
   }
 }
 
-/**
- * Rebuilds a canvas-encoded JPEG with the source's metadata segments in front.
- *
- * The canvas encoder writes APP segments of its own -- a JFIF header, and in
- * Chrome an sRGB ICC profile -- so the ones we are replacing have to come out
- * first. Leaving the encoder's profile in alongside the source's produces a
- * file with two ICC profiles, which is invalid.
- */
+/** Insert source metadata into a canvas-encoded JPEG.
+ * Remove replaced APP segments to avoid duplicate ICC profiles. */
 export function spliceMetadata(jpegBytes, segments) {
   if (jpegBytes[0] !== 0xff || jpegBytes[1] !== SOI) return jpegBytes;
 
@@ -219,7 +185,7 @@ export function spliceMetadata(jpegBytes, segments) {
   while (at + 3 < jpegBytes.length) {
     if (jpegBytes[at] !== 0xff) break;
     const marker = jpegBytes[at + 1];
-    // Anything that is not an APPn marker is image data proper; leave it alone.
+    // Stop at the first non-APP marker.
     if (marker < 0xe0 || marker > 0xef) break;
 
     const end = at + 2 + ((jpegBytes[at + 2] << 8) | jpegBytes[at + 3]);
@@ -228,12 +194,11 @@ export function spliceMetadata(jpegBytes, segments) {
 
     const isIcc = marker === APP2 && startsWith(jpegBytes, payload, ICC_ID);
     const drop =
-      marker === APP0 || // JFIF: density 1x1, says nothing worth keeping
-      marker === APP1 || // whatever we are inserting supersedes it
+      marker === APP0 || // Replace the encoder JFIF header.
+      marker === APP1 || // Replace encoder metadata with source metadata.
       (isIcc && replacingIcc);
 
-    // An encoder profile with no source profile to replace it is left in place,
-    // so the export does not come out untagged.
+    // Keep the encoder ICC profile if the source has none.
     if (!drop) kept.push(jpegBytes.slice(at, end));
     at = end;
   }
@@ -259,11 +224,7 @@ export function spliceMetadata(jpegBytes, segments) {
   return out;
 }
 
-/**
- * The whole job end to end: read the first frame's metadata, retarget it at the
- * export, and splice. Returns the original blob untouched when the source has
- * nothing to give.
- */
+/** Copy and update source metadata. Return the original blob if none is available. */
 export async function applySourceMetadata(blob, sourceFile, width, height) {
   const segments = await readSourceMetadata(sourceFile);
   if (!segments) return { blob, applied: false };

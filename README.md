@@ -1,40 +1,25 @@
 # [Star Trails](https://javier.xyz/startrails)
 
-Stack a folder of timelapse frames into a single star trail photo, in the
-browser.
+Stack timelapse frames into a star trail photo in your browser.
 
 [![Star Trails](public/javier-xyz-startrails.jpg)](https://javier.xyz/startrails)
 
 ## How it works
 
-Every frame is composited onto the same canvas with a `lighten` blend, which
-keeps the brightest pixel it has seen at each position. Stars move between
-exposures, so each one paints a line while the landscape underneath stays put.
+Frames are composited with `lighten` blending, which keeps the brightest pixel
+at each position. Increasing opacity through the sequence produces faded trails
+with bright heads. **Min opacity** sets the minimum contribution of each frame.
 
-Stacking at full opacity gives every star an even streak that starts and stops
-abruptly, so each frame is instead drawn at a fraction of full opacity. Early
-frames land faint and later ones land solid, which fades every trail in behind a
-bright head. **Min opacity** puts a floor under that curve so the oldest frames
-still register.
+**Curve** uses `position^power`, with position running from 0 to 1 across the
+selected range. A wider range produces longer trails.
 
-There are two ways to shape the falloff:
+**Linear** reduces opacity by `1/trail` per frame. With a trail of 4, the newest
+four frames contribute 100%, 75%, 50%, and 25%. The browser uses the selection
+length as the trail. The CLI accepts a shorter `--trail` and skips older frames,
+reducing decoding and export time. A positive min opacity includes those frames.
 
-**Curve** draws each frame at `position^power`, where position runs from 0 at
-the first frame to 1 at the last. The ramp is measured against the range, so it
-always stretches to fill whatever you have selected: widen the range and the
-trails get longer.
-
-**Linear** steps the opacity down by a fixed `1/trail` per frame instead. With a
-trail of 4 the newest frame lands at 100%, then 75%, 50%, 25%, and anything
-older contributes nothing. In the browser the trail is the selection itself, so
-the ramp always reaches its faintest at the oldest frame you selected. On the
-command line `--trail` can be shorter than the range, and because the frames
-past it are skipped rather than drawn, a short trail over a long range is
-proportionally cheaper to stack, decode, and export. A min opacity above 0 lifts
-them back into the stack and gives that up.
-
-| Parameter     | Default | What it does                                                        |
-| ------------- | ------- | ------------------------------------------------------------------- |
+| Parameter     | Default | What it does                                                         |
+| ------------- | ------- | -------------------------------------------------------------------- |
 | `power`       | `2`     | Curve falloff. 1 is a straight ramp; higher sharpens the trail head. |
 | `trail`       | range   | Linear falloff length, in frames. The browser uses the whole range.  |
 | `min opacity` | `0`     | Floor for the opacity curve, as a percentage.                        |
@@ -45,85 +30,65 @@ shots as short as the camera allows.
 
 ## Frame order
 
-Frames are stacked in filename order, the way the folder reads in Finder: digit
-runs compare as numbers, so `shot2.jpg` lands before `shot10.jpg` rather than
-after `shot12.jpg`. This matters because opacity is applied by position in the
-sequence, so a scrambled order produces a scrambled stack.
-
-Zero-padded camera filenames (`DSCF1888.jpg`, `IMG_0123.jpg`) sort identically
-either way. Unpadded ones do not, which is where the command line version, using
-a plain `readdirSync().sort()`, would disagree.
+The browser sorts filenames numerically: `shot2.jpg` precedes `shot10.jpg`.
+Frame order determines opacity. The CLI sorts alphabetically, so use zero-padded
+filenames for consistent results in both versions.
 
 ## Video input
 
-A single `.mp4`, `.mov`, `.m4v` or `.webm` can be dropped in instead of photos.
-The app retains the original clip and up to 600 evenly spaced sample timestamps.
-Its frame rate is estimated from playback, with a 30 fps fallback; variable-rate
-clips and browser seeking can produce uneven or repeated decoded frames. The UI
-labels this estimate rather than promising frame-exact extraction.
+Drop a single `.mp4`, `.mov`, `.m4v`, or `.webm` instead of photos. The app
+keeps the original clip and samples up to 600 evenly spaced timestamps. Frame
+rate is estimated from playback, with a 30 fps fallback. Variable-rate clips and
+browser seeking can produce uneven or repeated frames.
 
-Import encodes only reduced preview JPEGs. Full-resolution frames are never
-collected in memory: refinement and export seek the original video sequentially,
-transfer one frame to the worker, composite it, and release it before requesting
-the next. Video exports carry no EXIF. Video processing uses the browser's SDR
-canvas output; this is not an HDR-preserving workflow.
+Import creates reduced JPEG previews. Refinement and export decode and composite
+one frame at a time from the original video. Video exports have no source EXIF.
+Processing uses the browser's SDR canvas output and does not preserve HDR.
 
 ## The sample clip
 
-The page first displays a poster, then loads prepared JPEG previews from
-`public/sample/`. These are generated from every frame of the bundled sample and
-require no video seeking or encoding at startup. Once loaded, the frame range
-sweeps from the first frame to the complete stack. Selecting a source cancels
-sample loading.
+Startup displays a poster and loads prepared JPEG previews from
+`public/sample/`, then animates the frame range from the first frame to the full
+stack. Selecting a source cancels sample loading.
 
-The original `public/example-startrail.mp4` is fetched only when a refinement or
-export needs it. To regenerate the previews and timestamp manifest, install
-FFmpeg (including ffprobe) and run `pnpm generate:sample`.
+The original `public/example-startrail.mp4` loads only for refinement or export.
+To regenerate previews and the timestamp manifest, install FFmpeg and ffprobe,
+then run `pnpm generate:sample`.
 
 ## Everything runs locally
 
-There is no server processing and no upload. A Web Worker composites the frames.
-The decoded interaction cache is limited to **64 MiB**, separate from the visible
-composite, decoder surfaces, temporary frame and render canvas. Long sequences
-receive smaller proxies without dropping photo frames. Replacing a source
-releases the cache while retaining the last displayed composite.
+Frames are processed locally in a Web Worker, without uploads.
 
-Slider changes use the fast cache immediately. After 300 ms without another
-change, a refinement pass reads every selected source frame at the displayed
-size multiplied by device pixel ratio, capped at source resolution and a longest
-side of 1440 pixels. It swaps in only after completion; newer changes cancel it.
-The displayed size is independent of cache resolution and remains capped by the
-viewport. Resizing the window is reflected on the next refinement.
+The decoded preview cache is limited to **64 MiB**, excluding the displayed
+composite, decoder surfaces, temporary frame, and render canvas. Longer
+sequences use smaller previews without dropping photo frames. Replacing a source
+releases the cache and retains the displayed composite until the new source is
+ready.
 
-Export decodes one frame at a time at the requested resolution. Rotation is
-applied directly into the output canvas, avoiding a second full-size rotation
-buffer. Cancellation releases video sessions, temporary canvases, and bitmaps;
-source generations and job IDs prevent stale results from changing the UI or
-starting a download. These limits reduce memory pressure but are not a guarantee
-against browser process termination on every device or input size.
+Slider changes use the cache immediately. After 300 ms idle, refinement reads
+the selected source frames at display size × device pixel ratio, capped at
+source resolution and a 1440-pixel longest side. Completed refinement replaces
+the preview; newer changes cancel it. Window resizing applies on the next
+refinement.
+
+Export decodes one frame at a time and applies rotation directly to the output
+canvas. Cancellation releases temporary resources. Source generations and job
+IDs prevent stale results or downloads. Large inputs can still exceed device
+memory.
 
 ## EXIF
 
-Canvas encoders drop all metadata, so the export lifts the APP segments out of
-the first frame's bytes and splices them into the finished JPEG: camera, lens,
-date, shooting settings, XMP and the ICC profile all carry over, and the result
-files alongside the frames it came from.
-
-Three things are corrected on the way through. Orientation is reset to 1,
-because the frames were already rotated when they were decoded. The pixel
-dimensions are updated to the real output size. The embedded thumbnail is
-dropped, so no viewer previews a single unstacked frame. As with the command
-line version, the exposure tags describe the first frame, not the stack.
+JPEG export copies the first frame's EXIF, XMP, and ICC metadata, including
+camera, lens, date, and shooting settings. It resets orientation to 1, updates
+pixel dimensions, and removes the embedded thumbnail reference. Exposure tags
+describe the first frame.
 
 ## Opening a folder
 
-Chromium browsers get a real directory handle: the folder is remembered between
-visits, and **Rescan** re-reads it so frames shot since show up. Browsers cannot
-watch a folder for changes on their own yet. The File System Observer origin
-trial ended at Chrome 134, so refreshing is a button rather than automatic.
+Chromium directory handles support reopening folders between visits and manual
+updates through **Rescan**. The app does not watch for file changes.
 
-Safari and Firefox fall back to a folder upload or drag-and-drop, which reads
-the same frames but cannot be rescanned.
+Safari and Firefox use folder selection or drag-and-drop without rescanning.
 
 ## Development
 
@@ -147,23 +112,20 @@ pnpm test:browser
 ```
 
 The browser suite serves `out/` under `/startrails`, exercises Chromium and
-WebKit, and compares faint-star refinement with a resized full-resolution export.
-It also covers video import, rotated export, cancellation, source replacement,
-decode errors, and worker teardown. Set `CHROME_CHANNEL=chrome` to use an
-installed Chrome instead of Playwright's Chromium. Testing on the physical
-phone with the original failing clip remains necessary to confirm the reported
-iPhone reload is resolved.
+WebKit, and compares faint-star refinement with a resized full-resolution
+export. It also covers video import, rotated export, cancellation, source
+replacement, decode errors, and worker teardown. Set `CHROME_CHANNEL=chrome` to
+use an installed Chrome instead of Playwright's Chromium. Verify iPhone reload
+fixes on the affected phone with the original clip.
 
-One constraint worth knowing: `src/workers/stack.worker.js` must not import
-anything. Under `output: 'export'` Turbopack copies it into `_next/static/media`
-verbatim instead of bundling it, so an import would survive into the emitted
-file as a bare specifier and 404 at runtime.
+Keep `src/workers/stack.worker.js` import-free. With `output: 'export'`,
+Turbopack copies it verbatim into `_next/static/media`; bare imports cause
+runtime 404s.
 
 ## Command line version
 
-`cli/` holds the original command line tool, which does the same thing over a
-folder on disk using node-canvas and exiftool. It keeps its own `package.json`
-so the web app's install never pulls a native module:
+The CLI processes a local folder using node-canvas, with optional metadata
+copying through exiftool. Its dependencies are installed separately:
 
 ```sh
 cd cli
@@ -174,21 +136,34 @@ node star-trails.js --src=/path/to/frames
 | Parameter       | Default                                       | What it does                                                  |
 | --------------- | --------------------------------------------- | ------------------------------------------------------------- |
 | `--src`         | required                                      | Folder of frames.                                             |
-| `--power`       | `2`                                           | Curve falloff. Higher sharpens the trail head.                 |
-| `--trail`       | off                                           | Linear falloff length in frames. Overrides `--power`.          |
-| `--min-opacity` | `0`                                           | Floor for the opacity curve, 0-100.                            |
-| `--first`       | first frame                                   | Start from this filename, inclusive.                           |
-| `--last`        | last frame                                    | Stop at this filename, inclusive.                              |
-| `--out`         | `./out/[first]-[last]-p[power][-mo[min]].jpg` | Output path. Linear mode writes `l[trail]` for the `p` token.  |
+| `--power`       | `2`                                           | Curve falloff. Higher sharpens the trail head.                |
+| `--trail`       | off                                           | Linear falloff length in frames. Overrides `--power`.         |
+| `--min-opacity` | `0`                                           | Floor for the opacity curve, 0-100.                           |
+| `--first`       | first frame                                   | Start from this filename, inclusive.                          |
+| `--last`        | last frame                                    | Stop at this filename, inclusive.                             |
+| `--out`         | `./out/[first]-[last]-p[power][-mo[min]].jpg` | Output path. Linear mode writes `l[trail]` for the `p` token. |
 | `--exif`        | off                                           | Copy metadata from the first frame. Needs `exiftool` on PATH. |
 
-Two differences from the web tool, both in `--exif`, which shells out to
-`exiftool -TagsFromFile` and copies the source tags verbatim. The output keeps
-the source's `Orientation`, even though node-canvas already rotated the pixels,
-so an oriented sequence exports sideways; and it keeps the source's pixel
-dimensions and embedded thumbnail, which describe one unstacked frame. The web
-tool corrects all three.
+CLI `--exif` copies source tags verbatim through `exiftool -TagsFromFile`. It
+retains orientation despite already-rotated pixels, which can rotate the output
+incorrectly. It also retains source dimensions and the source thumbnail. The
+browser export corrects these fields.
+
+## Open source
+
+| Dependency                                                             | License |
+| ---------------------------------------------------------------------- | ------- |
+| [React and React DOM](https://github.com/react/react)                  | MIT     |
+| [Next.js and `@next/third-parties`](https://github.com/vercel/next.js) | MIT     |
+| [Mediabunny](https://github.com/Vanilagy/mediabunny)                   | MPL-2.0 |
+
+Mediabunny muxes MP4, WebM, and Live Photo MOV exports. It is used unmodified;
+`pnpm-lock.yaml` pins the version.
+[Source](https://github.com/Vanilagy/mediabunny) and
+[license](https://github.com/Vanilagy/mediabunny/blob/main/LICENSE) are
+available upstream; the installed license is at
+`node_modules/mediabunny/LICENSE`.
 
 ## License
 
-BSD-3-Clause
+BSD-3-Clause, in [LICENSE](LICENSE).
