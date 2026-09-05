@@ -213,7 +213,9 @@ export async function createVideoEncoder({ width, height, fps, livePhoto = false
               packet.data,
               packet.type,
               packet.timestamp + loop * cycleSpan,
-              packet.duration,
+              // WebKit can omit encoded chunk durations. Keep the last frame
+              // inside the movie timeline so it can carry a Live Photo still.
+              packet.duration || 1 / fps,
               loop * packets.length + i
             ),
             meta

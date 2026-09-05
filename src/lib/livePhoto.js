@@ -5,6 +5,28 @@ export const LIVE_PHOTO_FPS = 30;
 export const LIVE_PHOTO_SECONDS = 3;
 export const LIVE_PHOTO_MAX_FRAMES = LIVE_PHOTO_FPS * LIVE_PHOTO_SECONDS;
 
+/** Ease the selection from 1/16–1/8 to 1/2–1 of the stack. */
+export function automaticFrameSelection(totalFrames) {
+  const last = Math.max(0, totalFrames - 1);
+  const first = Math.max(0, Math.floor(totalFrames / 2) - 1);
+  const startFirst = Math.max(0, Math.floor(totalFrames / 16) - 1);
+  const startLast = Math.max(0, Math.floor(totalFrames / 8) - 1);
+  const cycleFrames = last === 0 ? 1 : LIVE_PHOTO_MAX_FRAMES;
+  const selections = Array.from({ length: cycleFrames }, (_, index) => {
+    const t = cycleFrames === 1 ? 0 : index / (cycleFrames - 1);
+    const eased = t * t * (3 - 2 * t);
+    return {
+      first: Math.round(startFirst + (first - startFirst) * eased),
+      last: Math.round(startLast + (last - startLast) * eased),
+    };
+  });
+  return {
+    selections, cycleFrames, cycleDuration: cycleFrames / LIVE_PHOTO_FPS,
+    loops: 1, stillFrame: cycleFrames - 1, sampled: false,
+    totalOutputFrames: cycleFrames, duration: cycleFrames / LIVE_PHOTO_FPS,
+  };
+}
+
 // Limit movie resolution. Render the paired still at full resolution.
 const LIVE_PHOTO_LONG_SIDE = 1440;
 

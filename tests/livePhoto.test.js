@@ -5,7 +5,7 @@ import {
   Input, BufferSource, ALL_FORMATS, Output, MovOutputFormat, BufferTarget,
   EncodedVideoPacketSource, EncodedPacketSink,
 } from 'mediabunny';
-import { livePhotoSize, livePhotoJpeg, livePhotoMov } from '../src/lib/livePhoto.js';
+import { livePhotoSize, livePhotoJpeg, livePhotoMov, automaticFrameSelection } from '../src/lib/livePhoto.js';
 
 const identifier = '12345678-1234-1234-1234-123456789abc';
 const buffer = async (blob) => Buffer.from(await blob.arrayBuffer());
@@ -149,4 +149,29 @@ test('MOV keeps all encoded frames and places the timed still marker at the sele
     await assert.rejects(livePhotoMov(new Blob([target.buffer]), identifier, 100, 30), /outside/);
     await assert.rejects(livePhotoMov(new Blob(['invalid']), identifier, 0, 30));
   } finally { input.dispose(); }
+});
+
+
+test('automatic selection eases from 1/16–1/8 to the latter half, with a matching final still', () => {
+  for (const count of [1, 2, 5, 16, 120, 160, 600]) {
+    const plan = automaticFrameSelection(count);
+    assert.deepEqual(plan.selections[0], {
+      first: Math.max(0, Math.floor(count / 16) - 1),
+      last: Math.max(0, Math.floor(count / 8) - 1),
+    });
+    assert.deepEqual(plan.selections[plan.stillFrame], {
+      first: Math.max(0, Math.floor(count / 2) - 1), last: count - 1,
+    });
+    assert.ok(plan.duration <= 3);
+    for (let i = 1; i < plan.selections.length; i++) {
+      const previous = plan.selections[i - 1];
+      const current = plan.selections[i];
+      assert.ok(current.first >= previous.first && current.last >= previous.last);
+      assert.ok(current.first <= current.last && current.last < count);
+    }
+  }
+  const { selections } = automaticFrameSelection(600);
+  const step = (i) => selections[i].last - selections[i - 1].last;
+  assert.ok(step(1) < step(45));
+  assert.ok(step(89) < step(45));
 });

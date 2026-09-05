@@ -18,7 +18,7 @@ import {
 
 import {
   LIVE_PHOTO_FPS, LIVE_PHOTO_SECONDS, LIVE_PHOTO_MAX_FRAMES,
-  livePhotoSize, livePhotoJpeg, livePhotoMov,
+  livePhotoSize, livePhotoJpeg, livePhotoMov, automaticFrameSelection,
 } from '../lib/livePhoto.js';
 
 import { BASE_PATH } from '../lib/constants.js';
@@ -379,6 +379,7 @@ export default function StarTrailsApp() {
   const [rotation, setRotation] = useState(0);
   const [videoResolution, setVideoResolution] = useState(1080);
   const [exportKind, setExportKind] = useState('image');
+  const [liveMove, setLiveMove] = useState('automatic');
   const [fps, setFps] = useState(DEFAULT_FPS);
   const [minSeconds, setMinSeconds] = useState(DEFAULT_MIN_SECONDS);
   const [copyExif, setCopyExif] = useState(true);
@@ -991,7 +992,8 @@ export default function StarTrailsApp() {
   const allSelected = selected >= totalFrames;
   const videoPlan = planVideo({ totalFrames, windowWidth, fps, minSeconds });
   // Use the export plan for the sampling label.
-  const livePlan = planVideo({
+  const automaticLive = wantsLivePhoto && liveMove === 'automatic';
+  const livePlan = automaticLive ? automaticFrameSelection(totalFrames) : planVideo({
     totalFrames, windowWidth, fps: LIVE_PHOTO_FPS, minSeconds: 0,
     maxFrames: LIVE_PHOTO_MAX_FRAMES, stillPosition: first,
   });
@@ -1031,7 +1033,7 @@ export default function StarTrailsApp() {
     setError(null);
     setResult(null);
     const exportFps = wantsLivePhoto ? LIVE_PHOTO_FPS : fps;
-    const plan = planVideo({
+    const plan = automaticLive ? automaticFrameSelection(totalFrames) : planVideo({
       totalFrames, windowWidth, fps: exportFps,
       minSeconds: wantsLivePhoto ? 0 : minSeconds,
       ...(wantsLivePhoto
@@ -1067,7 +1069,7 @@ export default function StarTrailsApp() {
         setProgress({ phase: 'sequence', done: 0, total: plan.cycleFrames });
         stackerRef.current.exportSequence(
           { ...look, windowWidth, scale: wantsLivePhoto ? size.scale : scale, rotation,
-            stride: plan.stride, startPosition: plan.startPosition },
+            stride: plan.stride, startPosition: plan.startPosition, selections: plan.selections },
           async (bitmap, index, total) => {
             await encoder.add(bitmap, index);
             if (videoJobRef.current === job)
@@ -1076,8 +1078,9 @@ export default function StarTrailsApp() {
         );
       };
       if (wantsLivePhoto) {
-        setProgress({ phase: 'export', done: 0, total: selected });
-        stackerRef.current.exportImage({ ...look, first, last, scale: 1, rotation, quality: 1 });
+        const still = plan.selections?.[plan.stillFrame] ?? { first, last };
+        setProgress({ phase: 'export', done: 0, total: still.last - still.first + 1 });
+        stackerRef.current.exportImage({ ...look, ...still, scale: 1, rotation, quality: 1 });
       } else job.startSequence();
     } catch (err) {
       if (videoJobRef.current !== job) return;
@@ -1088,7 +1091,7 @@ export default function StarTrailsApp() {
     }
   }, [fps, look, minSeconds, outHeight, outWidth, rotation, scale, stopPlayback,
     totalFrames, windowWidth, discardVideoJob, wantsLivePhoto, natural, turned,
-    first, last, frames, selected]);
+    first, last, frames, selected, automaticLive]);
 
   const cancelExport = useCallback(() => {
     discardVideoJob();
@@ -1420,6 +1423,22 @@ export default function StarTrailsApp() {
             </Tabs>
           </OptionRow>
 
+          {wantsLivePhoto && (
+            <OptionRow label="Move">
+              <Tabs>
+                {[
+                  ['automatic', 'Automatic frame selection'],
+                  ['sliding', 'Sliding selection'],
+                ].map(([value, label]) => (
+                  <Tab key={value} active={liveMove === value}
+                    aria-disabled={controlsDisabled}
+                    onClick={() => !controlsDisabled && setLiveMove(value)}>
+                    {label}
+                  </Tab>
+                ))}
+              </Tabs>
+            </OptionRow>
+          )}
           {wantsVideo && (
             <OptionRow label="Size">
               <Tabs>
@@ -1442,16 +1461,16 @@ export default function StarTrailsApp() {
 
           {wantsLivePhoto ? (
             <SmallText>
-              Full-resolution photo, kept at the size the Image tab would export.
+              Full-resolution photo.{' '}
+              {automaticLive ? 'The selection starts at 1/16 to 1/8 of your frames and smoothly moves to the second half. The final image becomes the photo. ' : 'The photo uses your current selection. '}
               The animation runs {livePlan.cycleDuration.toFixed(1)} s at {LIVE_PHOTO_FPS} fps,
-              HEVC where the browser can encode it and H.264 otherwise, 1440 px on the
-              long side — what iOS pairs with its own stills.
+              up to 1440 px on the long side.
               {livePlan.sampled
-                ? ` The sweep is ${livePlan.positions} positions, sampled 1 in ${livePlan.stride} to stay inside the ${LIVE_PHOTO_SECONDS}-second limit.`
+                ? ` Some steps are skipped to keep the animation under ${LIVE_PHOTO_SECONDS} seconds.`
                 : ''}
-              {' '}Saves a matching JPEG and MOV — nothing to unzip. Select both and drag
-              them into Photos on Mac and they land as one Live Photo, ready to send
-              on to iPhone or iPad over iCloud Photos or AirDrop.
+              {' '}Saves a JPEG photo and a MOV video. Drag both files into Photos
+              on Mac to add them as one Live Photo. Then use iCloud Photos or AirDrop
+              to send it to your iPhone or iPad.
             </SmallText>
           ) : wantsVideo ? (
             <>
@@ -1460,7 +1479,7 @@ export default function StarTrailsApp() {
                 {fps} fps. The {videoPlan.cycleFrames}-frame loop repeats{' '}
                 {videoPlan.loops}× for {videoPlan.duration.toFixed(1)} s.
                 {videoDecodes
-                  ? ` Above preview size every one of those frames decodes its ${selected} source frames again — ${videoDecodes} decodes in all.`
+                  ? ' Larger exports take longer because each source frame must be loaded again.'
                   : ''}
               </SmallText>
 
@@ -1481,8 +1500,8 @@ export default function StarTrailsApp() {
               />
               <Space h={0.25} />
               <SmallText>
-                The loop repeats whole times, so the video only ever runs past
-                this, never short of it.
+                The video repeats the full loop until it reaches this length.
+                It may run a little longer.
               </SmallText>
 
               <Space h={0.75} />
@@ -1531,7 +1550,7 @@ export default function StarTrailsApp() {
         </div>
 
         {/* Keep this note visible while controls are disabled. A full selection cannot slide. */}
-        {wantsMotion && allSelected && (
+        {wantsMotion && !automaticLive && allSelected && (
           <>
             <Space h={1} />
             <Text style={{ color: 'var(--accent-color)' }}>
@@ -1544,7 +1563,7 @@ export default function StarTrailsApp() {
         <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
           <Button
             onClick={wantsMotion ? startVideoExport : startExport}
-            disabled={controlsDisabled || (wantsMotion && allSelected)}
+            disabled={controlsDisabled || (wantsMotion && !automaticLive && allSelected)}
           >
             {exporting
               ? wantsMotion

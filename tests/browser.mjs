@@ -46,6 +46,7 @@ try {
     ['chromium', chromium],
     ['webkit', webkit],
   ]) {
+    if (process.env.TEST_BROWSER && process.env.TEST_BROWSER !== name) continue;
     const browser = await engine.launch(
       name === 'chromium' && process.env.CHROME_CHANNEL
         ? { channel: process.env.CHROME_CHANNEL }
@@ -309,7 +310,7 @@ try {
         ctx.fillStyle = '#234567'; ctx.fillRect(0, 0, 128, 192);
         return canvas.toDataURL().split(',')[1];
       });
-      // Use over 90 positions to exercise duration-cap sampling.
+      // Use a long source to exercise the capped automatic selection animation.
       const photos = Array.from({ length: 120 }, (_, i) => ({
         name: `frame-${String(i).padStart(3, '0')}.png`,
         mimeType: 'image/png', buffer: Buffer.from(png, 'base64'),
@@ -331,7 +332,7 @@ try {
       while (downloads.length < beforeLive + 2 && Date.now() < liveDeadline)
         await page.waitForTimeout(100);
       const [photoDownload, movieDownload] = downloads.slice(beforeLive);
-      assert.equal(downloads.length, beforeLive + 2);
+      assert.equal(downloads.length, beforeLive + 2, await page.locator('body').innerText());
       const photoName = photoDownload.suggestedFilename();
       const movieName = movieDownload.suggestedFilename();
       assert.ok(photoName.endsWith('-live.jpg'), photoName);
