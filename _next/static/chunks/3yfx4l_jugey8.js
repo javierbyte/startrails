@@ -1,1 +1,0 @@
-(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,56164,t=>{t.q("/startrails/_next/static/media/stack.worker.03-12r77__-j7.js")}]);

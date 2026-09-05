@@ -10,6 +10,7 @@ let preview;
 let loading = 0;
 let rendering = null;
 let frameWait = null;
+let seqAck = null;
 let renderQueue = Promise.resolve();
 let renderVersion = 0;
 
@@ -31,6 +32,10 @@ function cancelRender() {
   if (frameWait) {
     frameWait.reject(cancelled());
     frameWait = null;
+  }
+  if (seqAck) {
+    seqAck.reject(cancelled());
+    seqAck = null;
   }
 }
 function context(canvas) {
@@ -147,6 +152,18 @@ async function load(message) {
     if (decoded !== bitmaps) decoded.forEach((bitmap) => bitmap.close());
   }
 }
+// One source frame at output resolution: decoded here for stills, seeked on the
+// main thread for videos because only it holds the decoder.
+function acquireFrame(index, width, height, job) {
+  return source.kind === 'video'
+    ? requestFrame(index, width, height, job)
+    : createImageBitmap(files[index], {
+        ...DECODE,
+        resizeWidth: width,
+        resizeHeight: height,
+        resizeQuality: 'high',
+      });
+}
 function requestFrame(index, width, height, job) {
   return new Promise((resolve, reject) => {
     frameWait = { resolve, reject, job };
@@ -181,15 +198,7 @@ async function render(message) {
     const count = message.last - message.first + 1;
     for (let i = 0; i < count; i++) {
       if (!current()) throw cancelled();
-      const bitmap =
-        source.kind === 'video'
-          ? await requestFrame(message.first + i, width, height, job)
-          : await createImageBitmap(files[message.first + i], {
-              ...DECODE,
-              resizeWidth: width,
-              resizeHeight: height,
-              resizeQuality: 'high',
-            });
+      const bitmap = await acquireFrame(message.first + i, width, height, job);
       try {
         if (!current()) throw cancelled();
         draw(ctx, bitmap, i, count, message, width, height);
@@ -226,6 +235,85 @@ async function render(message) {
     emit({ type: 'renderFinished' }, info);
   }
 }
+// Every position of the sliding window, one at a time. Nothing carries over
+// between positions -- the alpha ramp is measured against the window, so a
+// window that has moved is a different stack of different frames.
+//
+// The main thread encodes each position as it arrives and acknowledges it, which
+// is what keeps exactly one bitmap in flight no matter how far ahead of the
+// encoder the compositing runs.
+function waitForAck(job) {
+  return new Promise((resolve, reject) => {
+    seqAck = { resolve, reject, job };
+  });
+}
+async function renderSequence(message) {
+  cancelRender();
+  const info = {
+    generation,
+    requestId: message.requestId,
+    phase: 'sequence',
+  };
+  const job = { info, cancelled: false };
+  rendering = job;
+  let canvas;
+  const current = () => !job.cancelled && info.generation === generation;
+  try {
+    if (!files.length) throw new Error('Open a source before rendering.');
+    const width = Math.max(1, Math.round(natural.width * message.scale));
+    const height = Math.max(1, Math.round(natural.height * message.scale));
+    const view = outputSize(width, height, message.rotation);
+    // At or below the cached proxy size there is nothing a decode would add, and
+    // the cache turns each position into a handful of drawImage calls.
+    const cached = bitmaps.length === files.length && width <= preview.width;
+    const count = message.windowWidth + 1;
+    const total = files.length - message.windowWidth;
+
+    for (let position = 0; position < total; position++) {
+      if (!current()) throw cancelled();
+      canvas = new OffscreenCanvas(view.width, view.height);
+      const ctx = setup(canvas, width, height, message.rotation);
+      for (let i = 0; i < count; i++) {
+        if (!current()) throw cancelled();
+        const index = position + i;
+        const bitmap = cached
+          ? bitmaps[index]
+          : await acquireFrame(index, width, height, job);
+        try {
+          if (!current()) throw cancelled();
+          draw(ctx, bitmap, i, count, message, width, height);
+        } finally {
+          if (!cached) bitmap.close();
+        }
+      }
+      if (!current()) throw cancelled();
+      const bitmap = canvas.transferToImageBitmap();
+      canvas.width = canvas.height = 0;
+      canvas = null;
+      self.postMessage(
+        { type: 'sequenceFrame', ...info, bitmap, index: position, total },
+        [bitmap]
+      );
+      await waitForAck(job);
+    }
+
+    if (!current()) throw cancelled();
+    emit({ type: 'sequenceDone', ...view, frames: total }, info);
+  } catch (err) {
+    if (current() && err.name !== 'AbortError')
+      emit(
+        {
+          type: 'error',
+          message: `${err.message} Try a smaller output size if memory is limited.`,
+        },
+        info
+      );
+  } finally {
+    if (canvas) canvas.width = canvas.height = 0;
+    if (rendering === job) rendering = null;
+    emit({ type: 'renderFinished' }, info);
+  }
+}
 self.onmessage = async ({ data: message }) => {
   if (message.type === 'frame') {
     const pending = frameWait;
@@ -238,6 +326,18 @@ self.onmessage = async ({ data: message }) => {
       if (message.error) pending.reject(new Error(message.error));
       else pending.resolve(message.bitmap);
     } else message.bitmap?.close();
+    return;
+  }
+  if (message.type === 'sequenceAck') {
+    const pending = seqAck;
+    if (
+      pending &&
+      message.generation === pending.job.info.generation &&
+      message.requestId === pending.job.info.requestId
+    ) {
+      seqAck = null;
+      pending.resolve();
+    }
     return;
   }
   try {
@@ -260,12 +360,17 @@ self.onmessage = async ({ data: message }) => {
         { type: 'previewDone' },
         { generation, requestId: message.requestId, phase: 'preview' }
       );
-    } else if (message.type === 'refine' || message.type === 'export') {
+    } else if (
+      message.type === 'refine' ||
+      message.type === 'export' ||
+      message.type === 'sequence'
+    ) {
       cancelRender();
       const version = renderVersion;
+      const run = message.type === 'sequence' ? renderSequence : render;
       renderQueue = renderQueue.then(() => {
         if (version === renderVersion && message.generation === generation)
-          return render(message);
+          return run(message);
       });
       await renderQueue;
     }
