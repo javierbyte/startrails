@@ -37,6 +37,14 @@ async function main() {
     process.exit(1);
   }
 
+  // --trail switches the falloff from a curve stretched across the range to a
+  // linear ramp with a fixed step per frame, so the trails keep their length.
+  const trail = args['trail'] ? parseInt(args['trail'], 10) : null;
+  if (trail !== null && (isNaN(trail) || trail < 1)) {
+    console.error('Error: --trail must be a frame count of 1 or more');
+    process.exit(1);
+  }
+
   const minOpacityRaw = args['min-opacity'] ? parseFloat(args['min-opacity']) : 0;
   if (isNaN(minOpacityRaw) || minOpacityRaw < 0 || minOpacityRaw > 100) {
     console.error('Error: --min-opacity must be a percentage between 0 and 100');
@@ -83,7 +91,8 @@ async function main() {
   const firstFile = path.parse(files[0]).name;
   const lastFile = path.parse(files[files.length - 1]).name;
   const moSuffix = minOpacity > 0 ? `-mo${Math.round(minOpacity * 100)}` : '';
-  const defaultOut = `out/${firstFile}-${lastFile}-p${powerDecay}${moSuffix}.jpg`;
+  const falloff = trail !== null ? `l${trail}` : `p${powerDecay}`;
+  const defaultOut = `out/${firstFile}-${lastFile}-${falloff}${moSuffix}.jpg`;
   const outPath = args.out ? path.resolve(args.out) : path.resolve(defaultOut);
 
   // Ensure output directory exists
@@ -93,7 +102,8 @@ async function main() {
   }
 
   console.error(`Processing ${files.length} images...`);
-  console.error(`Power falloff: ${powerDecay}`);
+  if (trail !== null) console.error(`Linear falloff over ${trail} frames`);
+  else console.error(`Power falloff: ${powerDecay}`);
   if (minOpacity > 0) console.error(`Min opacity: ${Math.round(minOpacity * 100)}%`);
   console.error(`Output: ${outPath}`);
 
@@ -106,19 +116,34 @@ async function main() {
   const ctx = canvas.getContext('2d');
   ctx.globalCompositeOperation = 'lighten';
 
+  // Past the trail a linear ramp reaches zero, so those frames are not worth
+  // loading at all. A floor keeps every frame in the stack.
+  const start =
+    trail !== null && minOpacity === 0
+      ? Math.max(0, files.length - trail)
+      : 0;
+  const drawn = files.length - start;
+
   // Composite all images
-  for (let i = 0; i < files.length; i++) {
+  for (let i = start; i < files.length; i++) {
     const img = await loadImage(path.join(srcDir, files[i]));
-    const position = files.length > 1 ? i / (files.length - 1) : 1;
-    const powerFactor = Math.pow(position, powerDecay);
-    const opacity = minOpacity + (1 - minOpacity) * powerFactor;
+    let falloffFactor;
+    if (trail !== null) {
+      const age = files.length - 1 - i; // 0 is the newest frame
+      falloffFactor = Math.max(0, (trail - age) / trail);
+    } else {
+      const position = files.length > 1 ? i / (files.length - 1) : 1;
+      falloffFactor = Math.pow(position, powerDecay);
+    }
+    const opacity = minOpacity + (1 - minOpacity) * falloffFactor;
     ctx.globalAlpha = opacity;
     ctx.drawImage(img, 0, 0);
 
     // Progress to stderr
-    if ((i + 1) % 10 === 0 || i === files.length - 1) {
-      const percent = ((i + 1) / files.length * 100).toFixed(1);
-      console.error(`${i + 1}/${files.length} (${percent}%)`);
+    const done = i - start + 1;
+    if (done % 10 === 0 || i === files.length - 1) {
+      const percent = ((done / drawn) * 100).toFixed(1);
+      console.error(`${done}/${drawn} (${percent}%)`);
     }
   }
 

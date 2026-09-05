@@ -17,6 +17,50 @@
   opacity: 0.55;
 }
 
+/* Choices belong side by side. A jbx `Tabs` is a plain div, so its tabs would
+   otherwise stack full width and two adjacent groups would read as one list. */
+.jbx-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.jbx-tabs .jbx-tabs--tab {
+  flex: none;
+  padding-inline: calc(var(--size) * 0.6);
+}
+
+/* One row per group: what it sets, then its choices. The label is what tells
+   Format apart from Size when the two rows sit together, and the shared label
+   column lines the groups up instead of pushing them to opposite edges. */
+.option-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  padding-block: 0.25rem;
+}
+
+.option-row .option-label {
+  flex: none;
+  min-width: 6rem;
+}
+
+.option-row .jbx-tabs,
+.option-row .jbx-inline {
+  flex: 0 1 auto;
+  /* Keep a group whole: rather than splitting its choices across two lines
+     beside the label, it drops to a line of its own -- unless it is wider than
+     the row, where wrapping inside it is the only thing that fits. */
+  min-width: min(100%, max-content);
+}
+
+/* Buttons standing in a tab-height row, so a group of them keeps the row the
+   same height as one holding tabs. */
+.option-row .option-button {
+  height: var(--control-height-compact);
+}
+
 /* A frame interval reads like a video cropper: one rail, with an independently
    focusable handle at each end. The native ranges still provide all keyboard
    and pointer behavior; only their duplicate rails are replaced here. */
@@ -226,6 +270,16 @@
   height: 100%;
   background-color: #fff;
   transition: width 0.12s linear;
+}
+
+/* The same readout on the card instead of over the preview, so it needs the
+   dark-on-light inverse of the overlay's colors. */
+.export-progress .bar {
+  background-color: #00000018;
+}
+
+.export-progress .bar-fill {
+  background-color: #000;
 }
 
 .github-corner {

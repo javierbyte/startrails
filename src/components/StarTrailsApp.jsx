@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   Box,
@@ -57,7 +57,7 @@ const SAMPLE = {
   preview: { width: 893, height: 1340, density: 2 },
 };
 
-const DEFAULTS = { power: 1, minOpacity: 0 };
+const DEFAULTS = { fade: 'linear', power: 1, minOpacity: 0 };
 const INTRO_DURATION = 1000;
 const PLAYBACK_INTERVAL = 1000 / 15;
 const POWER_MIN = 0.1;
@@ -110,6 +110,29 @@ function Card({ children, disabled = false }) {
       aria-disabled={disabled || undefined}
     >
       <Box padding={1}>{children}</Box>
+    </div>
+  );
+}
+
+/** A named group of choices: the label on the left, the choices beside it, so
+    two adjacent groups read as two rows rather than one long list. */
+function OptionRow({ label, children }) {
+  return (
+    <div className="option-row">
+      <Text className="option-label">{label}</Text>
+      {children}
+    </div>
+  );
+}
+
+/** The label and bar for whatever is running, wherever it is being shown. */
+function Progress({ progress, percent }) {
+  return (
+    <div role="status" aria-live="polite">
+      <SmallText>{progressLabel(progress)}</SmallText>
+      <div className="bar">
+        <div className="bar-fill" style={{ width: `${percent}%` }} />
+      </div>
     </div>
   );
 }
@@ -306,6 +329,7 @@ export default function StarTrailsApp() {
   const [preview, setPreview] = useState(SAMPLE.preview);
   const [hasPreview, setHasPreview] = useState(false);
 
+  const [fade, setFade] = useState(DEFAULTS.fade);
   const [powerSlider, setPowerSlider] = useState(() =>
     sliderFromPower(DEFAULTS.power)
   );
@@ -313,6 +337,16 @@ export default function StarTrailsApp() {
   const [minOpacity, setMinOpacity] = useState(DEFAULTS.minOpacity);
   const [first, setFirst] = useState(0);
   const [last, setLast] = useState(0);
+  const selected = last - first + 1;
+  // The falloff every render path shares. Curve mode ignores `trail` and linear
+  // mode ignores `power`; sending both keeps the worker message flat. Linear's
+  // fixed step per frame is sized to the selection, so the ramp always reaches
+  // its faintest at the oldest selected frame -- widening the range is what
+  // makes the trails longer.
+  const look = useMemo(
+    () => ({ fade, power, trail: selected, minOpacity: minOpacity / 100 }),
+    [fade, minOpacity, power, selected]
+  );
   const [isPlaying, setIsPlaying] = useState(false);
 
   const [rotation, setRotation] = useState(0);
@@ -340,6 +374,7 @@ export default function StarTrailsApp() {
   const [result, setResult] = useState(null);
 
   const ready = status === 'ready' || status === 'intro' || status === 'exporting';
+  const exporting = status === 'exporting';
   const controlsDisabled = status !== 'ready';
   const mediaLoading = status === 'extracting' || status === 'loading';
   // "Nothing of the viewer's own is open yet." The sample counts as nothing:
@@ -416,12 +451,11 @@ export default function StarTrailsApp() {
         exportFileName({
           firstName: frames[first].name,
           lastName: frames[last].name,
-          power,
-          minOpacity: minOpacity / 100,
+          ...look,
         })
       );
     },
-    [copyExif, first, frames, last, minOpacity, power, source]
+    [copyExif, first, frames, last, look, source]
   );
 
   const finishVideoExport = useCallback(
@@ -450,8 +484,7 @@ export default function StarTrailsApp() {
           exportFileName({
             firstName: frames[0].name,
             lastName: frames[frames.length - 1].name,
-            power,
-            minOpacity: minOpacity / 100,
+            ...look,
             extension: job.encoder.extension,
           })
         );
@@ -464,7 +497,7 @@ export default function StarTrailsApp() {
         job.encoder.close();
       }
     },
-    [fps, frames, minOpacity, power]
+    [fps, frames, look]
   );
 
   eventRef.current = (message) => {
@@ -593,8 +626,8 @@ export default function StarTrailsApp() {
       skipNextPreviewRef.current = false;
       return;
     }
-    sendPreview({ power, minOpacity: minOpacity / 100, first, last, rotation });
-  }, [ready, power, minOpacity, first, last, rotation, sendPreview]);
+    sendPreview({ ...look, first, last, rotation });
+  }, [ready, look, first, last, rotation, sendPreview]);
 
   // The saved poster is frame 1, so the sample can hand off without a visual
   // jump and then quickly reveal the complete trail. Controls stay inert until
@@ -705,8 +738,7 @@ export default function StarTrailsApp() {
       stackerRef.current.load(
         nextFrames,
         {
-          power,
-          minOpacity: minOpacity / 100,
+          ...look,
           first: 0,
           last: intro ? 0 : nextFrames.length - 1,
           rotation,
@@ -715,7 +747,7 @@ export default function StarTrailsApp() {
         details.source
       );
     },
-    [frames.length, minOpacity, power, rotation]
+    [frames.length, look, rotation]
   );
 
   const acceptVideo = useCallback(
@@ -908,17 +940,16 @@ export default function StarTrailsApp() {
 
   const hasFrames = frames.length > 0;
   const totalFrames = hasFrames ? frames.length : SAMPLE.frames;
-  const selected = last - first + 1;
 
   const turned = rotation === 90 || rotation === 270;
   const hasDimensions = natural.width > 0 && natural.height > 0;
   const previewScale = natural.width ? preview.width / natural.width : 1;
   const scaleOptions = [
-    { key: 'full', label: 'Full size', factor: 1 },
+    { key: 'full', label: 'Full', factor: 1 },
     { key: 'half', label: 'Half', factor: 0.5 },
     {
       key: 'preview',
-      label: 'Preview size',
+      label: 'Preview',
       factor: hasDimensions ? previewScale : null,
     },
   ];
@@ -941,7 +972,7 @@ export default function StarTrailsApp() {
     ? videoSize({ width: outWidth, height: outHeight })
     : null;
   const videoDecodes =
-    scale > previewScale ? videoPlan.cycleFrames * (windowWidth + 1) : 0;
+    scale > previewScale ? videoPlan.cycleFrames * selected : 0;
 
   // --- export ------------------------------------------------------------
 
@@ -951,16 +982,19 @@ export default function StarTrailsApp() {
     setResult(null);
     previewRef.current = { busy: false, queued: null, sent: null };
     setStatus('exporting');
-    setProgress({ phase: 'export', done: 0, total: last - first + 1 });
+    setProgress({
+      phase: 'export',
+      done: 0,
+      total: last - first + 1,
+    });
     stackerRef.current.exportImage({
-      power,
-      minOpacity: minOpacity / 100,
+      ...look,
       first,
       last,
       scale,
       rotation,
     });
-  }, [first, last, minOpacity, power, rotation, scale, stopPlayback]);
+  }, [first, last, look, rotation, scale, stopPlayback]);
 
   // Only the loop is composited. Repeating it to reach the minimum length is the
   // muxer's job, so a longer video is not a longer render.
@@ -991,8 +1025,7 @@ export default function StarTrailsApp() {
     setProgress({ phase: 'sequence', done: 0, total: plan.cycleFrames });
     stackerRef.current.exportSequence(
       {
-        power,
-        minOpacity: minOpacity / 100,
+        ...look,
         windowWidth,
         scale,
         rotation,
@@ -1004,11 +1037,10 @@ export default function StarTrailsApp() {
     );
   }, [
     fps,
-    minOpacity,
+    look,
     minSeconds,
     outHeight,
     outWidth,
-    power,
     rotation,
     scale,
     stopPlayback,
@@ -1174,15 +1206,9 @@ export default function StarTrailsApp() {
           ref={canvasRef}
           className={`preview-canvas${hasPreview ? '' : ' -hidden'}`}
         />
-        {progress && (
-          <div className="stage-status" role="status" aria-live="polite">
-            <SmallText>{progressLabel(progress)}</SmallText>
-            <div className="bar">
-              <div
-                className="bar-fill"
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
+        {progress && !exporting && (
+          <div className="stage-status">
+            <Progress progress={progress} percent={progressPercent} />
           </div>
         )}
       </div>
@@ -1225,22 +1251,52 @@ export default function StarTrailsApp() {
           onWindowChange={changeFrameWindow}
         />
 
-        <Space h={1} />
-        <Text>
-          Decay <strong>{power.toFixed(1)}</strong>
-        </Text>
+        <Space h={0.75} />
+        <OptionRow label="Fade">
+          <Tabs>
+            <Tab
+              active={fade === 'curve'}
+              aria-disabled={controlsDisabled}
+              onClick={() => !controlsDisabled && setFade('curve')}
+            >
+              Curve
+            </Tab>
+            <Tab
+              active={fade === 'linear'}
+              aria-disabled={controlsDisabled}
+              onClick={() => !controlsDisabled && setFade('linear')}
+            >
+              Linear
+            </Tab>
+          </Tabs>
+        </OptionRow>
         <Space h={0.25} />
-        <Range
-          aria-label="Decay"
-          aria-valuetext={power.toFixed(1)}
-          min={0}
-          max={POWER_SLIDER_STEPS}
-          step={1}
-          value={powerSlider}
-          disabled={controlsDisabled}
-          onChange={(event) => setPowerSlider(Number(event.target.value))}
-        />
-        <Space h={1} />
+
+        {fade === 'curve' ? (
+          <>
+            <Text>
+              Decay <strong>{power.toFixed(1)}</strong>
+            </Text>
+            <Space h={0.25} />
+            <Range
+              aria-label="Decay"
+              aria-valuetext={power.toFixed(1)}
+              min={0}
+              max={POWER_SLIDER_STEPS}
+              step={1}
+              value={powerSlider}
+              disabled={controlsDisabled}
+              onChange={(event) => setPowerSlider(Number(event.target.value))}
+            />
+          </>
+        ) : (
+          <SmallText>
+            The fade steps down by the same amount across the {selected} frames
+            you selected, so the oldest is the faintest. Widen the range for
+            longer trails.
+          </SmallText>
+        )}
+        <Space h={0.75} />
 
         <Text>
           Min opacity <strong>{minOpacity}%</strong>
@@ -1254,27 +1310,33 @@ export default function StarTrailsApp() {
           disabled={controlsDisabled}
           onChange={(event) => setMinOpacity(Number(event.target.value))}
         />
-        <Space h={1} />
-        <Text>
-          Rotation <strong>{rotation}°</strong>
-        </Text>
-        <Space h={0.25} />
-        <Inline style={{ alignItems: 'center', gap: '0.75rem' }}>
-          <Button
-            disabled={controlsDisabled}
-            onClick={() => turn(-90)}
-            aria-label="Rotate left 90 degrees"
-          >
-            ⟲ Left
-          </Button>
-          <Button
-            disabled={controlsDisabled}
-            onClick={() => turn(90)}
-            aria-label="Rotate right 90 degrees"
-          >
-            ⟳ Right
-          </Button>
-        </Inline>
+        <Space h={0.75} />
+        <OptionRow
+          label={
+            <>
+              Rotation <strong>{rotation}°</strong>
+            </>
+          }
+        >
+          <Inline wrap={false} style={{ flex: 'none', gap: '0.5rem' }}>
+            <Button
+              className="option-button"
+              disabled={controlsDisabled}
+              onClick={() => turn(-90)}
+              aria-label="Rotate left 90 degrees"
+            >
+              ⟲ Left
+            </Button>
+            <Button
+              className="option-button"
+              disabled={controlsDisabled}
+              onClick={() => turn(90)}
+              aria-label="Rotate right 90 degrees"
+            >
+              ⟳ Right
+            </Button>
+          </Inline>
+        </OptionRow>
       </Card>
 
       <Space h={1} />
@@ -1288,39 +1350,42 @@ export default function StarTrailsApp() {
           inert={controlsDisabled ? true : undefined}
           aria-disabled={controlsDisabled || undefined}
         >
-          <Tabs>
-            <Tab
-              active={!wantsVideo}
-              aria-disabled={controlsDisabled}
-              onClick={() => !controlsDisabled && setExportKind('image')}
-            >
-              Image
-            </Tab>
-            <Tab
-              active={wantsVideo}
-              aria-disabled={controlsDisabled}
-              onClick={() => !controlsDisabled && setExportKind('video')}
-            >
-              Video
-            </Tab>
-          </Tabs>
-
-          <Space h={0.5} />
-          <Tabs>
-            {scaleOptions.map((option) => (
+          <OptionRow label="Format">
+            <Tabs>
               <Tab
-                key={option.key}
-                active={scaleKey === option.key}
-                aria-disabled={controlsDisabled || option.factor === null}
-                onClick={() => {
-                  if (!controlsDisabled && option.factor !== null)
-                    setScaleKey(option.key);
-                }}
+                active={!wantsVideo}
+                aria-disabled={controlsDisabled}
+                onClick={() => !controlsDisabled && setExportKind('image')}
               >
-                {option.label}
+                Image
               </Tab>
-            ))}
-          </Tabs>
+              <Tab
+                active={wantsVideo}
+                aria-disabled={controlsDisabled}
+                onClick={() => !controlsDisabled && setExportKind('video')}
+              >
+                Video
+              </Tab>
+            </Tabs>
+          </OptionRow>
+
+          <OptionRow label="Size">
+            <Tabs>
+              {scaleOptions.map((option) => (
+                <Tab
+                  key={option.key}
+                  active={scaleKey === option.key}
+                  aria-disabled={controlsDisabled || option.factor === null}
+                  onClick={() => {
+                    if (!controlsDisabled && option.factor !== null)
+                      setScaleKey(option.key);
+                  }}
+                >
+                  {option.label}
+                </Tab>
+              ))}
+            </Tabs>
+          </OptionRow>
           <Space h={0.5} />
 
           {wantsVideo ? (
@@ -1334,7 +1399,7 @@ export default function StarTrailsApp() {
                   : ''}
               </SmallText>
 
-              <Space h={1} />
+              <Space h={0.75} />
               <Text>
                 Minimum length <strong>{minSeconds}s</strong>
               </Text>
@@ -1355,23 +1420,21 @@ export default function StarTrailsApp() {
                 this, never short of it.
               </SmallText>
 
-              <Space h={1} />
-              <Text>
-                Frame rate <strong>{fps} fps</strong>
-              </Text>
-              <Space h={0.25} />
-              <Tabs>
-                {FPS_OPTIONS.map((option) => (
-                  <Tab
-                    key={option}
-                    active={fps === option}
-                    aria-disabled={controlsDisabled}
-                    onClick={() => !controlsDisabled && setFps(option)}
-                  >
-                    {option}
-                  </Tab>
-                ))}
-              </Tabs>
+              <Space h={0.75} />
+              <OptionRow label="Frame rate">
+                <Tabs>
+                  {FPS_OPTIONS.map((option) => (
+                    <Tab
+                      key={option}
+                      active={fps === option}
+                      aria-disabled={controlsDisabled}
+                      onClick={() => !controlsDisabled && setFps(option)}
+                    >
+                      {option}
+                    </Tab>
+                  ))}
+                </Tabs>
+              </OptionRow>
             </>
           ) : (
             <>
@@ -1420,7 +1483,7 @@ export default function StarTrailsApp() {
             onClick={wantsVideo ? startVideoExport : startExport}
             disabled={controlsDisabled || (wantsVideo && allSelected)}
           >
-            {status === 'exporting'
+            {exporting
               ? wantsVideo
                 ? 'Rendering…'
                 : 'Stacking…'
@@ -1428,10 +1491,20 @@ export default function StarTrailsApp() {
                 ? 'Export video'
                 : 'Export JPEG'}
           </Button>
-          {status === 'exporting' && (
-            <Button onClick={cancelExport}>Cancel</Button>
-          )}
+          {exporting && <Button onClick={cancelExport}>Cancel</Button>}
         </Inline>
+
+        {/* Beside the button rather than over the preview: on a phone the
+            preview is scrolled well off the top by the time anyone presses
+            export, so progress shown up there is progress nobody sees. */}
+        {progress && exporting && (
+          <>
+            <Space h={0.75} />
+            <div className="export-progress">
+              <Progress progress={progress} percent={progressPercent} />
+            </div>
+          </>
+        )}
 
         {result && (
           <>

@@ -146,6 +146,31 @@ try {
           (960 * 640 * 3);
         const fastError = error(fast),
           refinedError = error(refined);
+        // Linear falloff steps down by a fixed 1/trail per frame, so only the
+        // newest four frames reach the stack. Row 20 carries exactly one star
+        // per frame -- j=0, marching one pixel right each time -- so frames 36
+        // to 39 land at 25/50/75/100% on columns 56 to 59 and every earlier
+        // column stays at the #030507 background.
+        events.length = 0;
+        stacker.exportImage({ ...params, fade: 'linear', trail: 4, scale: 1 });
+        await until(() => events.some((e) => e.type === 'exportDone'));
+        const linear = events.find((e) => e.type === 'exportDone');
+        const linearBitmap = await createImageBitmap(linear.blob);
+        const linearCanvas = document.createElement('canvas');
+        linearCanvas.width = 1200;
+        linearCanvas.height = 800;
+        const linearCtx = linearCanvas.getContext('2d');
+        linearCtx.drawImage(linearBitmap, 0, 0);
+        linearBitmap.close();
+        const row = linearCtx.getImageData(0, 20, 1200, 1).data;
+        // R+G+B rather than one channel: JPEG subsamples chroma but keeps luma
+        // per pixel, so the sum survives where a single channel can drift.
+        const lum = (x) => row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2];
+        const linearTail = [lum(56), lum(57), lum(58), lum(59)];
+        const linearDropped = Math.max(
+          ...Array.from({ length: 31 }, (_, i) => lum(20 + i))
+        );
+        const linearFrames = linear.frames;
         // Rapid changes must settle on the newest range and rotation.
         for (let i = 0; i < 12; i++)
           stacker.preview({
@@ -228,10 +253,27 @@ try {
         return {
           fastError,
           refinedError,
+          linearTail,
+          linearDropped,
+          linearFrames,
           videoFrames: extracted.frames.length,
         };
       });
       assert.ok(result.refinedError < result.fastError, JSON.stringify(result));
+      const [q, h, tq, full] = result.linearTail;
+      assert.ok(
+        q < h && h < tq && tq < full,
+        `Linear falloff is not a descending tail: ${JSON.stringify(result.linearTail)}`
+      );
+      assert.ok(
+        q > full * 0.15 && q < full * 0.4,
+        `Oldest trail frame is not near a quarter of the newest: ${JSON.stringify(result.linearTail)}`
+      );
+      assert.ok(
+        result.linearDropped < q / 2,
+        `Frames past the trail still reached the stack: ${result.linearDropped} vs ${q}`
+      );
+      assert.equal(result.linearFrames, 4);
       console.log(`${name} rendering:`, result);
       // Verify the built app, including base-path worker and prebuilt sample assets.
       await page.goto(`${url}/startrails`);

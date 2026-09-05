@@ -33,8 +33,11 @@ export default function Page() {
       </Text>
       <Space h={1} />
       <Text>
-        <strong>Power</strong> controls how each trail fades in. Higher values
-        make a brighter, sharper head. <strong>Min opacity</strong> keeps older
+        <strong>Curve</strong> fades each trail in across whatever range you
+        select, so the trails stretch as you widen it — higher decay makes a
+        brighter, sharper head. <strong>Linear</strong> steps the fade down by a
+        fixed amount per frame instead, so a trail length set in frames holds
+        however much is selected. <strong>Min opacity</strong> keeps older
         frames visible.
       </Text>
 

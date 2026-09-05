@@ -12,17 +12,33 @@ keeps the brightest pixel it has seen at each position. Stars move between
 exposures, so each one paints a line while the landscape underneath stays put.
 
 Stacking at full opacity gives every star an even streak that starts and stops
-abruptly, so each frame is instead drawn at `position^power` of full opacity,
-where position runs from 0 at the first frame to 1 at the last. Early frames
-land faint and later ones land solid, which fades every trail in behind a bright
-head. **Min opacity** puts a floor under that curve so the oldest frames still
-register.
+abruptly, so each frame is instead drawn at a fraction of full opacity. Early
+frames land faint and later ones land solid, which fades every trail in behind a
+bright head. **Min opacity** puts a floor under that curve so the oldest frames
+still register.
 
-| Parameter     | Default | What it does                                                     |
-| ------------- | ------- | ---------------------------------------------------------------- |
-| `power`       | `2`     | Falloff curve. 1 is linear; higher values sharpen the trail head. |
-| `min opacity` | `0`     | Floor for the opacity curve, as a percentage.                     |
-| frame range   | all     | First and last frame of the sequence to stack.                    |
+There are two ways to shape the falloff:
+
+**Curve** draws each frame at `position^power`, where position runs from 0 at
+the first frame to 1 at the last. The ramp is measured against the range, so it
+always stretches to fill whatever you have selected: widen the range and the
+trails get longer.
+
+**Linear** steps the opacity down by a fixed `1/trail` per frame instead. With a
+trail of 4 the newest frame lands at 100%, then 75%, 50%, 25%, and anything
+older contributes nothing. In the browser the trail is the selection itself, so
+the ramp always reaches its faintest at the oldest frame you selected. On the
+command line `--trail` can be shorter than the range, and because the frames
+past it are skipped rather than drawn, a short trail over a long range is
+proportionally cheaper to stack, decode, and export. A min opacity above 0 lifts
+them back into the stack and gives that up.
+
+| Parameter     | Default | What it does                                                        |
+| ------------- | ------- | ------------------------------------------------------------------- |
+| `power`       | `2`     | Curve falloff. 1 is a straight ramp; higher sharpens the trail head. |
+| `trail`       | range   | Linear falloff length, in frames. The browser uses the whole range.  |
+| `min opacity` | `0`     | Floor for the opacity curve, as a percentage.                        |
+| frame range   | all     | First and last frame of the sequence to stack.                       |
 
 For best results use 20 to 40 second exposures and keep the interval between
 shots as short as the camera allows.
@@ -158,11 +174,12 @@ node star-trails.js --src=/path/to/frames
 | Parameter       | Default                                       | What it does                                                  |
 | --------------- | --------------------------------------------- | ------------------------------------------------------------- |
 | `--src`         | required                                      | Folder of frames.                                             |
-| `--power`       | `2`                                           | Falloff curve. Higher sharpens the trail head.                 |
+| `--power`       | `2`                                           | Curve falloff. Higher sharpens the trail head.                 |
+| `--trail`       | off                                           | Linear falloff length in frames. Overrides `--power`.          |
 | `--min-opacity` | `0`                                           | Floor for the opacity curve, 0-100.                            |
 | `--first`       | first frame                                   | Start from this filename, inclusive.                           |
 | `--last`        | last frame                                    | Stop at this filename, inclusive.                              |
-| `--out`         | `./out/[first]-[last]-p[power][-mo[min]].jpg` | Output path.                                                   |
+| `--out`         | `./out/[first]-[last]-p[power][-mo[min]].jpg` | Output path. Linear mode writes `l[trail]` for the `p` token.  |
 | `--exif`        | off                                           | Copy metadata from the first frame. Needs `exiftool` on PATH. |
 
 Two differences from the web tool, both in `--exif`, which shells out to

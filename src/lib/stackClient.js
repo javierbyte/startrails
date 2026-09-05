@@ -250,17 +250,24 @@ export function createStacker({ canvas, onEvent }) {
   };
 }
 
-/** Default output name, echoing the CLI's `[first]-[last]-p[power][-mo[min]]`. */
+/**
+ * Default output name, echoing the CLI's `[first]-[last]-p[power][-mo[min]]`.
+ * Linear mode swaps the `p` token for `l[trail]` so the two modes cannot
+ * overwrite each other's files.
+ */
 export function exportFileName({
   firstName,
   lastName,
+  fade,
   power,
+  trail,
   minOpacity,
   extension = 'jpg',
 }) {
   const stem = (name) => name.replace(/\.[^.]+$/, '');
+  const falloff = fade === 'linear' ? `l${trail}` : `p${power}`;
   const mo = minOpacity > 0 ? `-mo${Math.round(minOpacity * 100)}` : '';
-  return `${stem(firstName)}-${stem(lastName)}-p${power}${mo}.${extension}`;
+  return `${stem(firstName)}-${stem(lastName)}-${falloff}${mo}.${extension}`;
 }
 
 export function downloadBlob(blob, fileName) {
