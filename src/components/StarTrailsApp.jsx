@@ -125,6 +125,47 @@ function OptionRow({ label, children }) {
   );
 }
 
+/** An "i" beside a label that holds the explanation until it is asked for.
+    Hover or keyboard focus reveals it; the button is there so a tap works too,
+    where there is no hover to reveal anything. */
+function InfoTip({ label, children }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event) => {
+      if (!ref.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <span className={`info-tip${open ? ' -open' : ''}`} ref={ref}>
+      <button
+        type="button"
+        className="info-tip-button"
+        aria-label={label}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        i
+      </button>
+      <span className="info-tip-bubble" role="tooltip">
+        {children}
+      </span>
+    </span>
+  );
+}
+
 /** The label and bar for whatever is running, wherever it is being shown. */
 function Progress({ progress, percent }) {
   return (
@@ -1252,7 +1293,24 @@ export default function StarTrailsApp() {
         />
 
         <Space h={0.75} />
-        <OptionRow label="Fade">
+        <OptionRow
+          label={
+            <>
+              Fade{' '}
+              <InfoTip label="About the fade methods">
+                <strong>Curve</strong> fades along a curve you set with the
+                decay slider: a low decay keeps older frames bright for an even
+                trail, a high one drops them off fast for a bright head with a
+                faint tail.
+                <br />
+                <br />
+                <strong>Linear</strong> steps down by the same amount across the
+                frames you selected, so the oldest is the faintest. Widen the
+                range for longer trails.
+              </InfoTip>
+            </>
+          }
+        >
           <Tabs>
             <Tab
               active={fade === 'curve'}
@@ -1270,10 +1328,10 @@ export default function StarTrailsApp() {
             </Tab>
           </Tabs>
         </OptionRow>
-        <Space h={0.25} />
 
-        {fade === 'curve' ? (
+        {fade === 'curve' && (
           <>
+            <Space h={0.25} />
             <Text>
               Decay <strong>{power.toFixed(1)}</strong>
             </Text>
@@ -1289,12 +1347,6 @@ export default function StarTrailsApp() {
               onChange={(event) => setPowerSlider(Number(event.target.value))}
             />
           </>
-        ) : (
-          <SmallText>
-            The fade steps down by the same amount across the {selected} frames
-            you selected, so the oldest is the faintest. Widen the range for
-            longer trails.
-          </SmallText>
         )}
         <Space h={0.75} />
 
