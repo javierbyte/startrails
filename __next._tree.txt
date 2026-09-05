@@ -1,2 +1,2 @@
 :HL["/startrails/_next/static/chunks/1_kfqapzazqz1.css","style"]
-0:{"tree":{"name":"","param":null,"prefetchHints":4176,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":4256,"slots":null}}},"staleTime":300,"buildId":"xbn2ETzvP9QGePf2qqgtI"}
+0:{"tree":{"name":"","param":null,"prefetchHints":4176,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":4256,"slots":null}}},"staleTime":300,"buildId":"RItAIftTx0XF4Y3BpzxR5"}

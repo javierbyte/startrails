@@ -274,16 +274,21 @@ async function renderSequence(message) {
     const view = outputSize(width, height, message.rotation);
     // Reuse cached proxies when output resolution does not exceed proxy size.
     const cached = bitmaps.length === files.length && width <= preview.width;
-    const count = message.windowWidth + 1;
     const positions = files.length - message.windowWidth;
-    const start = firstVisible(count, message);
     // Use planVideo sampling for capped exports; defaults include every position.
     const stride = Math.max(1, Math.round(message.stride) || 1);
     const begin = Math.min(Math.max(0, Math.round(message.startPosition) || 0), stride - 1);
-    const total = Math.floor((positions - 1 - begin) / stride) + 1;
+    const selections = message.selections ?? Array.from(
+      { length: Math.floor((positions - 1 - begin) / stride) + 1 },
+      (_, index) => ({ first: begin + index * stride, last: begin + index * stride + message.windowWidth })
+    );
+    const total = selections.length;
     let output = 0;
 
-    for (let position = begin; position < positions; position += stride) {
+    for (const selection of selections) {
+      const position = selection.first;
+      const count = selection.last - selection.first + 1;
+      const start = firstVisible(count, message);
       if (!current()) throw cancelled();
       canvas = new OffscreenCanvas(view.width, view.height);
       const ctx = setup(canvas, width, height, message.rotation);
