@@ -61,11 +61,26 @@ function setup(canvas, width, height, rotation) {
   ctx.globalCompositeOperation = 'lighten';
   return ctx;
 }
-function draw(ctx, bitmap, index, count, params, width, height) {
+// Curve stretches the falloff across the window; linear gives it a fixed step
+// per frame, so the trail stays the same length however much is selected.
+function ramp(index, count, params) {
+  if (params.fade === 'linear') {
+    const age = count - 1 - index; // 0 is the newest frame in the window
+    return Math.max(0, (params.trail - age) / params.trail);
+  }
   const position = count > 1 ? index / (count - 1) : 1;
+  return position ** params.power;
+}
+function draw(ctx, bitmap, index, count, params, width, height) {
   ctx.globalAlpha =
-    params.minOpacity + (1 - params.minOpacity) * position ** params.power;
+    params.minOpacity + (1 - params.minOpacity) * ramp(index, count, params);
   ctx.drawImage(bitmap, 0, 0, width, height);
+}
+// Past the trail a linear ramp reaches zero, so those frames are not worth
+// drawing -- or, at export size, decoding. A floor keeps them all in the stack.
+function firstVisible(count, params) {
+  if (params.fade !== 'linear' || params.minOpacity > 0) return 0;
+  return Math.max(0, count - params.trail);
 }
 function publish(canvas, info) {
   const bitmap = canvas.transferToImageBitmap();
@@ -79,7 +94,7 @@ function drawCached(params, info) {
   try {
     const ctx = setup(canvas, width, height, params.rotation);
     const count = params.last - params.first + 1;
-    for (let i = 0; i < count; i++)
+    for (let i = firstVisible(count, params); i < count; i++)
       draw(ctx, bitmaps[params.first + i], i, count, params, width, height);
     publish(canvas, info);
   } finally {
@@ -196,7 +211,9 @@ async function render(message) {
     canvas = new OffscreenCanvas(view.width, view.height);
     const ctx = setup(canvas, width, height, message.rotation);
     const count = message.last - message.first + 1;
-    for (let i = 0; i < count; i++) {
+    const start = firstVisible(count, message);
+    const drawn = count - start;
+    for (let i = start; i < count; i++) {
       if (!current()) throw cancelled();
       const bitmap = await acquireFrame(message.first + i, width, height, job);
       try {
@@ -206,7 +223,7 @@ async function render(message) {
         bitmap.close();
       }
       if (message.type === 'export')
-        emit({ type: 'progress', done: i + 1, total: count }, info);
+        emit({ type: 'progress', done: i - start + 1, total: drawn }, info);
       // Yield to cancellation even when a decoder resolves immediately.
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -218,7 +235,7 @@ async function render(message) {
         quality: 0.95,
       });
       if (!current()) throw cancelled();
-      emit({ type: 'exportDone', blob, ...view, frames: count }, info);
+      emit({ type: 'exportDone', blob, ...view, frames: drawn }, info);
     }
   } catch (err) {
     if (current() && err.name !== 'AbortError')
@@ -268,12 +285,13 @@ async function renderSequence(message) {
     const cached = bitmaps.length === files.length && width <= preview.width;
     const count = message.windowWidth + 1;
     const total = files.length - message.windowWidth;
+    const start = firstVisible(count, message);
 
     for (let position = 0; position < total; position++) {
       if (!current()) throw cancelled();
       canvas = new OffscreenCanvas(view.width, view.height);
       const ctx = setup(canvas, width, height, message.rotation);
-      for (let i = 0; i < count; i++) {
+      for (let i = start; i < count; i++) {
         if (!current()) throw cancelled();
         const index = position + i;
         const bitmap = cached
