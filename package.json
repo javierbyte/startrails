@@ -4,13 +4,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@12.16.1",
   "homepage": "https://javier.xyz/startrails",
   "repository": {
     "type": "git",
     "url": "https://github.com/javierbyte/startrails/"
   },
-  "author": "Javier Bórquez <hi@javier.xyz> (http://github.com/javierbyte)",
+  "author": "Javier B\u00f3rquez <hi@javier.xyz> (http://github.com/javierbyte)",
   "license": "BSD-3-Clause",
   "scripts": {
     "dev": "echo 'Local:         http://localhost:3009/startrails' && next dev -p 3009",
@@ -20,14 +20,14 @@
     "generate:sample": "node scripts/generate-sample.mjs"
   },
   "dependencies": {
-    "@next/third-parties": "16.3.4",
+    "@next/third-parties": "16.4.3",
     "jbx": "^2.16.1",
-    "mediabunny": "^1.55.6",
-    "next": "16.3.4",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "mediabunny": "^1.64.0",
+    "next": "16.4.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "playwright": "1.62.1"
+    "playwright": "1.64.1"
   }
 }

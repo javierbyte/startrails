@@ -1,7 +1,7 @@
 {
   "name": "star-trails-cli",
   "version": "1.0.0",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@12.16.1",
   "description": "Create star trail images from timelapse photography with artistic power falloff curves",
   "main": "star-trails.js",
   "bin": {
@@ -17,6 +17,6 @@
     "photography"
   ],
   "dependencies": {
-    "canvas": "^3.2.1"
+    "canvas": "^3.2.3"
   }
 }

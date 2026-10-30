@@ -866,7 +866,6 @@ export default function StarTrailsApp() {
     const handle = idle ? requestIdleCallback(start, { timeout: 1000 }) : setTimeout(start, 200);
     return () => (idle ? cancelIdleCallback(handle) : clearTimeout(handle));
     // Load the sample once on mount. extractRef prevents duplicate loading.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openWithPicker = useCallback(async () => {
