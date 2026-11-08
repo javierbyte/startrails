@@ -10,7 +10,7 @@
     "type": "git",
     "url": "https://github.com/javierbyte/startrails/"
   },
-  "author": "Javier B\u00f3rquez <hi@javier.xyz> (http://github.com/javierbyte)",
+  "author": "Javier Bórquez <hi@javier.xyz> (http://github.com/javierbyte)",
   "license": "BSD-3-Clause",
   "scripts": {
     "dev": "echo 'Local:         http://localhost:3009/startrails' && next dev -p 3009",
@@ -20,14 +20,14 @@
     "generate:sample": "node scripts/generate-sample.mjs"
   },
   "dependencies": {
-    "@next/third-parties": "16.4.3",
+    "@next/third-parties": "16.4.5",
     "jbx": "^2.16.1",
-    "mediabunny": "^1.64.0",
-    "next": "16.4.3",
+    "mediabunny": "^1.65.2",
+    "next": "16.4.5",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "playwright": "1.64.1"
+    "playwright": "1.65.0"
   }
 }
